@@ -1,0 +1,31 @@
+[Unit]
+Description=Log Tailer -> Kafka
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=munycha-ubuntu26-wsl
+Group=munycha-ubuntu26-wsl
+
+ExecStart=/opt/log-tailer-go/log-tailer-go --config=/etc/log-tailer-go/config.json
+
+MemoryMax=64M
+MemorySwapMax=0
+CPUQuota=25%
+Nice=10
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
