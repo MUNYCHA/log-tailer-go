@@ -19,7 +19,7 @@ log-tailer-go/
 ├── config/
 │   ├── config.go        — config structs and validation
 │   ├── loader.go        — config loading and path resolution
-│   └── logTailer_config.sample.json
+│   └── config.example.json
 ├── model/
 │   └── event.go         — LogEvent JSON structure
 ├── kafka/
@@ -47,7 +47,7 @@ Each log line is published as a JSON object:
 Copy the sample config and fill in your values:
 
 ```bash
-cp config/logTailer_config.sample.json config/logTailer_config.json
+cp config/config.example.json config/config.json
 ```
 
 | Field | Description |

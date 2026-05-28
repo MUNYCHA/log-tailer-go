@@ -2,4 +2,4 @@
 log-tailer-go
 
 # local config with real values
-config/logTailer_config.json
+config/config.json

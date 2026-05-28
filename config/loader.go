@@ -9,7 +9,7 @@ import (
 
 const (
 	envKey      = "LOGTAILER_CONFIG"
-	defaultPath = "config/logTailer_config.json"
+	defaultPath = "config/config.json"
 )
 
 // ResolvePath picks the config path from CLI args, env var, or the built-in default.
