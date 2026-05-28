@@ -1,0 +1,22 @@
+{
+  "bootstrapServers": "broker1:9092,broker2:9092",
+
+  "identity": {
+    "system": {
+      "id": "your-system-id",
+      "name": "your-system-name"
+    },
+    "server": {
+      "name": "your-server-name",
+      "ip": "0.0.0.0"
+    }
+  },
+
+  "logTailer": {
+    "enabled": true,
+    "files": [
+      { "path": "/var/log/app/app.log", "topic": "your-topic-1" },
+      { "path": "/var/log/app/error.log", "topic": "your-topic-2" }
+    ]
+  }
+}
