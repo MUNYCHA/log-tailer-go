@@ -54,7 +54,16 @@ func main() {
 		wg.Add(1)
 		go func(f config.LogFileConfig) {
 			defer wg.Done()
-			tailer.New(f.Path, f.Topic, serverName, producer).Run(ctx)
+			for ctx.Err() == nil {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("Tailer panicked, restarting", "path", f.Path, "panic", r)
+						}
+					}()
+					tailer.New(f.Path, f.Topic, serverName, producer).Run(ctx)
+				}()
+			}
 		}(f)
 	}
 

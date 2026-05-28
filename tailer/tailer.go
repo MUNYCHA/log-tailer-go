@@ -126,18 +126,36 @@ func (t *Tailer) Run(ctx context.Context) {
 		}
 
 		if size > offset {
-			n, err := f.ReadAt(t.buf[:], offset)
-			if n > 0 {
-				offset += int64(n)
-				lineBuffer.Write(t.buf[:n])
-				t.flushCompleteLines(&lineBuffer)
+			// Drain all available data before sleeping — one 64 KB chunk per loop
+			// iteration so a burst of megabytes is processed without a 200 ms gap.
+			drainErr := false
+			for size > offset {
+				n, err := f.ReadAt(t.buf[:], offset)
+				if n > 0 {
+					offset += int64(n)
+					lineBuffer.Write(t.buf[:n])
+					t.flushCompleteLines(&lineBuffer)
+				}
+				if err != nil && err != io.EOF {
+					slog.Error("Recoverable read error, retrying", "path", t.path, "error", err)
+					f.Close()
+					f = nil
+					lineBuffer.Reset()
+					sleep(ctx, retryDelay)
+					drainErr = true
+					break
+				}
+				// Refresh size so we keep reading if more data arrived during this drain
+				if info, err = f.Stat(); err != nil {
+					break
+				}
+				size = info.Size()
+
+				if ctx.Err() != nil {
+					return
+				}
 			}
-			if err != nil && err != io.EOF {
-				slog.Error("Recoverable read error, retrying", "path", t.path, "error", err)
-				f.Close()
-				f = nil
-				lineBuffer.Reset()
-				sleep(ctx, retryDelay)
+			if drainErr {
 				continue
 			}
 		}
