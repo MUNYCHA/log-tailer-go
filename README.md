@@ -4,10 +4,12 @@ A lightweight log file tailer that reads log files and ships each line to Kafka 
 
 ## Features
 
-- Tails one or more log files concurrently
+- Tails one or more log files concurrently, starting at the end of each file — only lines written after startup are shipped
 - Detects log rotation, truncation, and file disappearance — auto-recovers without manual intervention
 - Ships each line as a JSON event to Kafka
 - Batches messages for efficient network usage
+- Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
+- Per-file tailers recover from panics and restart automatically
 - Structured logging via `log/slog`
 - Graceful shutdown on `SIGTERM` / `SIGINT` — flushes Kafka before exiting
 
@@ -24,8 +26,10 @@ log-tailer-go/
 │   └── event.go         — LogEvent JSON structure
 ├── kafka/
 │   └── producer.go      — Kafka async producer
-└── tailer/
-    └── tailer.go        — core file tailing logic
+├── tailer/
+│   └── tailer.go        — core file tailing logic
+└── deploy/
+    └── log-tailer-go.service — systemd unit for production
 ```
 
 ## Kafka Message Format
@@ -69,42 +73,39 @@ go build -o log-tailer-go .
 ## Run
 
 ```bash
-# uses config/logTailer_config.json by default
+# uses config/config.json by default
 ./log-tailer-go
 
 # specify config path explicitly
-./log-tailer-go --config=/etc/log-tailer/config.json
+./log-tailer-go --config=/etc/log-tailer-go/config.json
+
+# or as a positional argument
+./log-tailer-go /etc/log-tailer-go/config.json
 
 # via environment variable
-LOGTAILER_CONFIG=/etc/log-tailer/config.json ./log-tailer-go
+LOGTAILER_CONFIG=/etc/log-tailer-go/config.json ./log-tailer-go
 ```
+
+Priority: command-line argument (flag or positional) > `LOGTAILER_CONFIG` env var > default path.
 
 ## Production Deployment (systemd)
 
-```ini
-[Unit]
-Description=Log Tailer -> Kafka
-After=network-online.target
-Wants=network-online.target
+The unit file lives at [`deploy/log-tailer-go.service`](deploy/log-tailer-go.service). It expects the binary at `/opt/log-tailer-go/log-tailer-go` and the config at `/etc/log-tailer-go/config.json`; adjust `User=`/`Group=` to an account that can read your log files.
 
-[Service]
-Type=simple
-User=logtailer
-Group=logtailer
-ExecStart=/opt/log-tailer-go/log-tailer-go --config=/etc/log-tailer/config.json
-Restart=on-failure
-RestartSec=5
-TimeoutStopSec=20
-MemoryMax=64M
-MemorySwapMax=0
-CPUQuota=25%
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo mkdir -p /opt/log-tailer-go /etc/log-tailer-go
+sudo cp log-tailer-go /opt/log-tailer-go/
+sudo cp config/config.json /etc/log-tailer-go/
+sudo cp deploy/log-tailer-go.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now log-tailer-go
 ```
+
+The unit fences the service hard:
+
+- `MemoryMax=64M` + `MemorySwapMax=0` — hard memory ceiling (includes page cache), no swap
+- `CPUQuota=25%` + `Nice=10` — at most a quarter of one core, yields to everything else
+- `ProtectSystem=strict` + `NoNewPrivileges` — entire filesystem is read-only to the process, kernel-enforced
+- `Restart=on-failure` + `RestartSec=5` — self-heals indefinitely, including when Kafka is down at boot
 
 > No JVM flags needed — Go binaries use only what they need.
