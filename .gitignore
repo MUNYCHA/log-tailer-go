@@ -3,3 +3,6 @@ log-tailer-go
 
 # local config with real values
 config/config.json
+
+# JetBrains IDE settings
+.idea/
