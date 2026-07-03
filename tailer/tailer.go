@@ -145,7 +145,7 @@ func (t *Tailer) Run(ctx context.Context) {
 				if n > 0 {
 					offset += int64(n)
 					lineBuffer.Write(t.buf[:n])
-					t.flushCompleteLines(&lineBuffer)
+					t.flushCompleteLines(ctx, &lineBuffer)
 				}
 				if err != nil && err != io.EOF {
 					slog.Error("Recoverable read error, retrying", "path", t.path, "error", err)
@@ -219,13 +219,13 @@ func fileInode(path string) (uint64, error) {
 
 // flushCompleteLines extracts complete newline-terminated lines from buf and ships each to Kafka.
 // Incomplete trailing data stays in the buffer for the next read.
-func (t *Tailer) flushCompleteLines(buf *bytes.Buffer) {
+func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 	data := buf.Bytes()
 
 	// Guard against unbounded buffer growth when no newline appears for a long time
 	if len(data) > maxLineBytes {
 		slog.Warn("Line exceeds max length, flushing oversized chunk", "path", t.path, "max_bytes", maxLineBytes)
-		t.sendToKafka(string(data[:maxLineBytes]))
+		t.sendToKafka(ctx, string(data[:maxLineBytes]))
 		buf.Next(maxLineBytes)
 		return
 	}
@@ -248,7 +248,7 @@ func (t *Tailer) flushCompleteLines(buf *bytes.Buffer) {
 			continue
 		}
 
-		t.sendToKafka(line)
+		t.sendToKafka(ctx, line)
 	}
 
 	if consumed > 0 {
@@ -256,7 +256,7 @@ func (t *Tailer) flushCompleteLines(buf *bytes.Buffer) {
 	}
 }
 
-func (t *Tailer) sendToKafka(line string) {
+func (t *Tailer) sendToKafka(ctx context.Context, line string) {
 	event := model.LogEvent{
 		ServerName: t.serverName,
 		Path:       t.path,
@@ -271,12 +271,17 @@ func (t *Tailer) sendToKafka(line string) {
 		return
 	}
 
-	t.producer.Input() <- &sarama.ProducerMessage{
+	// Don't block on a stalled producer during shutdown — a down Kafka would
+	// drop these lines after retries anyway
+	select {
+	case t.producer.Input() <- &sarama.ProducerMessage{
 		Topic: t.topic,
 		Key:   sarama.StringEncoder(t.serverName),
 		Value: sarama.ByteEncoder(payload),
+	}:
+		t.shipped++
+	case <-ctx.Done():
 	}
-	t.shipped++
 }
 
 func sleep(ctx context.Context, d time.Duration) {

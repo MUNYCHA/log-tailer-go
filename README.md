@@ -13,7 +13,7 @@ A lightweight log file tailer that reads log files and ships each line to Kafka 
 - Heartbeat log every 5 minutes per file with lines shipped — silent zero-shipping is visible in the journal
 - Waits for Kafka at startup — retries every 5 s instead of exiting, so it also self-heals when run without systemd
 - Structured logging via `log/slog`
-- Graceful shutdown on `SIGTERM` / `SIGINT` — flushes Kafka before exiting
+- Graceful shutdown on `SIGTERM` / `SIGINT` — flushes Kafka before exiting, with a 10 s flush deadline so a dead Kafka can't stall the exit
 
 ## Project Structure
 

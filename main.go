@@ -17,6 +17,8 @@ import (
 const (
 	restartDelay      = time.Second
 	kafkaConnectRetry = 5 * time.Second
+	// Must stay below the systemd unit's TimeoutStopSec=20
+	flushTimeout = 10 * time.Second
 )
 
 func main() {
@@ -92,10 +94,21 @@ func main() {
 	cancel()
 	wg.Wait()
 
-	if err := producer.Close(); err != nil {
-		slog.Error("Error closing Kafka producer", "error", err)
+	// Flush with a deadline — against a dead Kafka, Close can spend minutes
+	// retrying messages that are doomed anyway
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		if err := producer.Close(); err != nil {
+			slog.Error("Error closing Kafka producer", "error", err)
+		}
+		<-errDone
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(flushTimeout):
+		slog.Warn("Kafka flush timed out, exiting without full delivery", "timeout", flushTimeout)
 	}
-	<-errDone
 
 	slog.Info("Shutdown complete")
 }
