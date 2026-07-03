@@ -23,6 +23,7 @@ const (
 	rotationCheckEvery = 25 // cycles (~5 s at 200 ms poll)
 	retryDelay         = time.Second
 	waitForFileDelay   = time.Second
+	heartbeatInterval  = 5 * time.Minute
 )
 
 type Tailer struct {
@@ -31,6 +32,7 @@ type Tailer struct {
 	serverName string
 	producer   sarama.AsyncProducer
 	buf        [readBufSize]byte // reused per read, no per-poll allocation
+	shipped    int64             // lines shipped since last heartbeat; touched only by the Run goroutine
 }
 
 func New(path, topic, serverName string, producer sarama.AsyncProducer) *Tailer {
@@ -52,8 +54,9 @@ func (t *Tailer) Run(ctx context.Context) {
 		fileIno    uint64
 		offset     int64
 		lineBuffer bytes.Buffer
-		startAtEnd = true // first open skips existing content
-		cycle      int
+		startAtEnd    = true // first open skips existing content
+		cycle         int
+		lastHeartbeat = time.Now()
 	)
 
 	defer func() {
@@ -65,6 +68,14 @@ func (t *Tailer) Run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+
+		// Periodic liveness report — fires even while waiting for the file,
+		// so silent zero-shipping is visible in the journal
+		if time.Since(lastHeartbeat) >= heartbeatInterval {
+			slog.Info("Tailer heartbeat", "path", t.path, "topic", t.topic, "lines_shipped", t.shipped)
+			t.shipped = 0
+			lastHeartbeat = time.Now()
 		}
 
 		// Open file if not already open
@@ -265,6 +276,7 @@ func (t *Tailer) sendToKafka(line string) {
 		Key:   sarama.StringEncoder(t.serverName),
 		Value: sarama.ByteEncoder(payload),
 	}
+	t.shipped++
 }
 
 func sleep(ctx context.Context, d time.Duration) {

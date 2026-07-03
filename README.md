@@ -9,7 +9,9 @@ A lightweight log file tailer that reads log files and ships each line to Kafka 
 - Ships each line as a JSON event to Kafka
 - Batches messages for efficient network usage
 - Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
-- Per-file tailers recover from panics and restart automatically
+- Per-file tailers recover from panics and restart automatically (1 s delay so a crash loop can't spin hot)
+- Heartbeat log every 5 minutes per file with lines shipped — silent zero-shipping is visible in the journal
+- Waits for Kafka at startup — retries every 5 s instead of exiting, so it also self-heals when run without systemd
 - Structured logging via `log/slog`
 - Graceful shutdown on `SIGTERM` / `SIGINT` — flushes Kafka before exiting
 
