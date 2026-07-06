@@ -65,18 +65,22 @@ func (t *Tailer) Run(ctx context.Context) {
 		}
 	}()
 
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		// Periodic liveness report — fires even while waiting for the file,
-		// so silent zero-shipping is visible in the journal
+	// Periodic liveness report — fires even while waiting for the file,
+	// so silent zero-shipping is visible in the journal
+	heartbeat := func() {
 		if time.Since(lastHeartbeat) >= heartbeatInterval {
 			slog.Info("Tailer heartbeat", "path", t.path, "topic", t.topic, "lines_shipped", t.shipped)
 			t.shipped = 0
 			lastHeartbeat = time.Now()
 		}
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		heartbeat()
 
 		// Open file if not already open
 		if f == nil {
@@ -165,6 +169,11 @@ func (t *Tailer) Run(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
+
+				// A sustained burst can keep us in this drain loop past the
+				// heartbeat interval — report from here too so a busy tailer
+				// doesn't go silent
+				heartbeat()
 			}
 			if drainErr {
 				continue
