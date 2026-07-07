@@ -17,6 +17,9 @@ func NewProducer(bootstrapServers string) (sarama.AsyncProducer, error) {
 	}
 
 	cfg := sarama.NewConfig()
+	// Small internal queues so a Kafka outage backpressures the tailers
+	// early instead of buffering thousands of messages in memory
+	cfg.ChannelBufferSize = 32
 	cfg.Producer.RequiredAcks = sarama.WaitForLocal    // acks=1
 	cfg.Producer.Flush.Frequency = 5 * time.Millisecond // linger.ms=5
 	cfg.Producer.Flush.Bytes = 65536                    // batch.size=65536
