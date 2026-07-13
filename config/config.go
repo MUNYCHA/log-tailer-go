@@ -3,9 +3,15 @@ package config
 import "fmt"
 
 type AppConfig struct {
-	BootstrapServers string          `json:"bootstrapServers"`
-	Identity         IdentityConfig  `json:"identity"`
-	LogTailer        LogTailerConfig `json:"logTailer"`
+	Redis     RedisConfig     `json:"redis"`
+	Identity  IdentityConfig  `json:"identity"`
+	LogTailer LogTailerConfig `json:"logTailer"`
+}
+
+type RedisConfig struct {
+	Addr     string `json:"addr"`
+	Password string `json:"password"`
+	DB       int    `json:"db"`
 }
 
 type IdentityConfig struct {
@@ -29,13 +35,13 @@ type LogTailerConfig struct {
 }
 
 type LogFileConfig struct {
-	Path  string `json:"path"`
-	Topic string `json:"topic"`
+	Path    string `json:"path"`
+	Channel string `json:"channel"`
 }
 
 func (c *AppConfig) Validate() error {
-	if c.BootstrapServers == "" {
-		return fmt.Errorf("'bootstrapServers' is required")
+	if c.Redis.Addr == "" {
+		return fmt.Errorf("'redis.addr' is required")
 	}
 	if c.Identity.System.ID == "" {
 		return fmt.Errorf("'identity.system.id' is required")
@@ -54,8 +60,8 @@ func (c *AppConfig) Validate() error {
 			if f.Path == "" {
 				return fmt.Errorf("each 'logTailer.files' entry must have a 'path'")
 			}
-			if f.Topic == "" {
-				return fmt.Errorf("each 'logTailer.files' entry must have a 'topic'")
+			if f.Channel == "" {
+				return fmt.Errorf("each 'logTailer.files' entry must have a 'channel'")
 			}
 		}
 	}

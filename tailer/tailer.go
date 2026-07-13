@@ -11,8 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/IBM/sarama"
-
 	"log-tailer-go/model"
 )
 
@@ -26,28 +24,33 @@ const (
 	heartbeatInterval  = 5 * time.Minute
 )
 
+// Publisher ships a serialized log event to a pub/sub channel.
+type Publisher interface {
+	Publish(ctx context.Context, channel string, payload []byte) error
+}
+
 type Tailer struct {
 	path       string
-	topic      string
+	channel    string
 	serverName string
-	producer   sarama.AsyncProducer
+	publisher  Publisher
 	buf        [readBufSize]byte // reused per read, no per-poll allocation
 	shipped    int64             // lines shipped since last heartbeat; touched only by the Run goroutine
 }
 
-func New(path, topic, serverName string, producer sarama.AsyncProducer) *Tailer {
+func New(path, channel, serverName string, publisher Publisher) *Tailer {
 	return &Tailer{
 		path:       path,
-		topic:      topic,
+		channel:    channel,
 		serverName: serverName,
-		producer:   producer,
+		publisher:  publisher,
 	}
 }
 
-// Run tails the file and ships each complete line to Kafka.
+// Run tails the file and ships each complete line to Redis Pub/Sub.
 // Returns when ctx is cancelled (graceful shutdown).
 func (t *Tailer) Run(ctx context.Context) {
-	slog.Info("Starting log tailer", "path", t.path, "topic", t.topic)
+	slog.Info("Starting log tailer", "path", t.path, "channel", t.channel)
 
 	var (
 		f          *os.File
@@ -69,7 +72,7 @@ func (t *Tailer) Run(ctx context.Context) {
 	// so silent zero-shipping is visible in the journal
 	heartbeat := func() {
 		if time.Since(lastHeartbeat) >= heartbeatInterval {
-			slog.Info("Tailer heartbeat", "path", t.path, "topic", t.topic, "lines_shipped", t.shipped)
+			slog.Info("Tailer heartbeat", "path", t.path, "channel", t.channel, "lines_shipped", t.shipped)
 			t.shipped = 0
 			lastHeartbeat = time.Now()
 		}
@@ -226,7 +229,7 @@ func fileInode(path string) (uint64, error) {
 	return stat.Ino, nil
 }
 
-// flushCompleteLines extracts complete newline-terminated lines from buf and ships each to Kafka.
+// flushCompleteLines extracts complete newline-terminated lines from buf and publishes each.
 // Incomplete trailing data stays in the buffer for the next read.
 func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 	data := buf.Bytes()
@@ -234,7 +237,7 @@ func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 	// Guard against unbounded buffer growth when no newline appears for a long time
 	if len(data) > maxLineBytes {
 		slog.Warn("Line exceeds max length, flushing oversized chunk", "path", t.path, "max_bytes", maxLineBytes)
-		t.sendToKafka(ctx, string(data[:maxLineBytes]))
+		t.publish(ctx, string(data[:maxLineBytes]))
 		buf.Next(maxLineBytes)
 		return
 	}
@@ -257,7 +260,7 @@ func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 			continue
 		}
 
-		t.sendToKafka(ctx, line)
+		t.publish(ctx, line)
 	}
 
 	if consumed > 0 {
@@ -265,11 +268,11 @@ func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 	}
 }
 
-func (t *Tailer) sendToKafka(ctx context.Context, line string) {
+func (t *Tailer) publish(ctx context.Context, line string) {
 	event := model.LogEvent{
 		ServerName: t.serverName,
 		Path:       t.path,
-		Topic:      t.topic,
+		Channel:    t.channel,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		Message:    line,
 	}
@@ -280,16 +283,11 @@ func (t *Tailer) sendToKafka(ctx context.Context, line string) {
 		return
 	}
 
-	// Don't block on a stalled producer during shutdown — a down Kafka would
-	// drop these lines after retries anyway
-	select {
-	case t.producer.Input() <- &sarama.ProducerMessage{
-		Topic: t.topic,
-		Key:   sarama.StringEncoder(t.serverName),
-		Value: sarama.ByteEncoder(payload),
-	}:
+	// The publisher logs delivery failures (throttled); the line is dropped —
+	// loss is accepted over buffering. ctx aborts a publish against a stalled
+	// Redis during shutdown.
+	if err := t.publisher.Publish(ctx, t.channel, payload); err == nil {
 		t.shipped++
-	case <-ctx.Done():
 	}
 }
 

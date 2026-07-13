@@ -1,5 +1,5 @@
 [Unit]
-Description=Log Tailer -> Kafka
+Description=Log Tailer -> Redis Pub/Sub
 After=network-online.target
 Wants=network-online.target
 

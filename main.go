@@ -10,15 +10,13 @@ import (
 	"time"
 
 	"log-tailer-go/config"
-	"log-tailer-go/kafka"
+	"log-tailer-go/redis"
 	"log-tailer-go/tailer"
 )
 
 const (
 	restartDelay      = time.Second
-	kafkaConnectRetry = 5 * time.Second
-	// Must stay below the systemd unit's TimeoutStopSec=20
-	flushTimeout = 10 * time.Second
+	redisConnectRetry = 5 * time.Second
 )
 
 func main() {
@@ -40,22 +38,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Retry until Kafka is reachable so a bare (non-systemd) run survives
-	// Kafka being down at startup. Ctrl+C / SIGTERM still kills the process
+	// Retry until Redis is reachable so a bare (non-systemd) run survives
+	// Redis being down at startup. Ctrl+C / SIGTERM still kills the process
 	// here since graceful signal handling is installed later.
-	producer, err := kafka.NewProducer(cfg.BootstrapServers)
+	publisher, err := redis.New(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
 	for err != nil {
-		slog.Error("Failed to create Kafka producer, retrying", "error", err, "retry_in", kafkaConnectRetry)
-		time.Sleep(kafkaConnectRetry)
-		producer, err = kafka.NewProducer(cfg.BootstrapServers)
+		slog.Error("Failed to connect to Redis, retrying", "error", err, "retry_in", redisConnectRetry)
+		time.Sleep(redisConnectRetry)
+		publisher, err = redis.New(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
 	}
-
-	// Drain Kafka delivery errors in background; exits when producer is closed
-	errDone := make(chan struct{})
-	go func() {
-		defer close(errDone)
-		kafka.DrainErrors(producer)
-	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -73,7 +64,7 @@ func main() {
 							slog.Error("Tailer panicked, restarting", "path", f.Path, "panic", r)
 						}
 					}()
-					tailer.New(f.Path, f.Topic, serverName, producer).Run(ctx)
+					tailer.New(f.Path, f.Channel, serverName, publisher).Run(ctx)
 				}()
 				// Pause before restart so a repeatedly-panicking tailer
 				// cannot spin at full speed
@@ -94,20 +85,10 @@ func main() {
 	cancel()
 	wg.Wait()
 
-	// Flush with a deadline — against a dead Kafka, Close can spend minutes
-	// retrying messages that are doomed anyway
-	closeDone := make(chan struct{})
-	go func() {
-		defer close(closeDone)
-		if err := producer.Close(); err != nil {
-			slog.Error("Error closing Kafka producer", "error", err)
-		}
-		<-errDone
-	}()
-	select {
-	case <-closeDone:
-	case <-time.After(flushTimeout):
-		slog.Warn("Kafka flush timed out, exiting without full delivery", "timeout", flushTimeout)
+	// Publishes are synchronous — nothing is in flight after the tailers
+	// return, so close is immediate and cannot stall the exit
+	if err := publisher.Close(); err != nil {
+		slog.Error("Error closing Redis client", "error", err)
 	}
 
 	slog.Info("Shutdown complete")

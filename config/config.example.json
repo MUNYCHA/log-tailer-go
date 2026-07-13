@@ -1,5 +1,9 @@
 {
-  "bootstrapServers": "broker1:9092,broker2:9092",
+  "redis": {
+    "addr": "127.0.0.1:6379",
+    "password": "",
+    "db": 0
+  },
 
   "identity": {
     "system": {
@@ -15,8 +19,8 @@
   "logTailer": {
     "enabled": true,
     "files": [
-      { "path": "/var/log/app/app.log", "topic": "your-topic-1" },
-      { "path": "/var/log/app/error.log", "topic": "your-topic-2" }
+      { "path": "/var/log/app/app.log", "channel": "your-channel-1" },
+      { "path": "/var/log/app/error.log", "channel": "your-channel-2" }
     ]
   }
 }
