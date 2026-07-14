@@ -24,9 +24,10 @@ const (
 	heartbeatInterval  = 5 * time.Minute
 )
 
-// Publisher ships a serialized log event to a pub/sub channel.
+// Publisher ships a batch of serialized log events to a pub/sub channel in
+// one pipelined round trip, returning how many were accepted.
 type Publisher interface {
-	Publish(ctx context.Context, channel string, payload []byte) error
+	PublishBatch(ctx context.Context, channel string, payloads [][]byte) int
 }
 
 type Tailer struct {
@@ -35,6 +36,7 @@ type Tailer struct {
 	serverName string
 	publisher  Publisher
 	buf        [readBufSize]byte // reused per read, no per-poll allocation
+	batch      [][]byte          // payloads pending publish; reused, bounded by lines per read chunk
 	shipped    int64             // lines shipped since last heartbeat; touched only by the Run goroutine
 }
 
@@ -229,16 +231,19 @@ func fileInode(path string) (uint64, error) {
 	return stat.Ino, nil
 }
 
-// flushCompleteLines extracts complete newline-terminated lines from buf and publishes each.
-// Incomplete trailing data stays in the buffer for the next read.
+// flushCompleteLines extracts complete newline-terminated lines from buf and
+// publishes them as one pipelined batch — a burst pays one network round trip
+// per read chunk, not per line. Incomplete trailing data stays in the buffer
+// for the next read.
 func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 	data := buf.Bytes()
 
 	// Guard against unbounded buffer growth when no newline appears for a long time
 	if len(data) > maxLineBytes {
 		slog.Warn("Line exceeds max length, flushing oversized chunk", "path", t.path, "max_bytes", maxLineBytes)
-		t.publish(ctx, string(data[:maxLineBytes]))
+		t.appendEvent(string(data[:maxLineBytes]))
 		buf.Next(maxLineBytes)
+		t.publishBatch(ctx)
 		return
 	}
 
@@ -260,15 +265,17 @@ func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 			continue
 		}
 
-		t.publish(ctx, line)
+		t.appendEvent(line)
 	}
 
 	if consumed > 0 {
 		buf.Next(consumed)
 	}
+	t.publishBatch(ctx)
 }
 
-func (t *Tailer) publish(ctx context.Context, line string) {
+// appendEvent serializes line into a LogEvent and adds it to the pending batch.
+func (t *Tailer) appendEvent(line string) {
 	event := model.LogEvent{
 		ServerName: t.serverName,
 		Path:       t.path,
@@ -282,13 +289,18 @@ func (t *Tailer) publish(ctx context.Context, line string) {
 		slog.Error("Failed to serialize log event", "path", t.path, "error", err)
 		return
 	}
+	t.batch = append(t.batch, payload)
+}
 
-	// The publisher logs delivery failures (throttled); the line is dropped —
-	// loss is accepted over buffering. ctx aborts a publish against a stalled
-	// Redis during shutdown.
-	if err := t.publisher.Publish(ctx, t.channel, payload); err == nil {
-		t.shipped++
+// publishBatch ships the pending batch and resets it. The publisher logs
+// delivery failures (throttled); failed lines are dropped — loss is accepted
+// over buffering. ctx aborts a publish against a stalled Redis during shutdown.
+func (t *Tailer) publishBatch(ctx context.Context) {
+	if len(t.batch) == 0 {
+		return
 	}
+	t.shipped += int64(t.publisher.PublishBatch(ctx, t.channel, t.batch))
+	t.batch = t.batch[:0]
 }
 
 func sleep(ctx context.Context, d time.Duration) {

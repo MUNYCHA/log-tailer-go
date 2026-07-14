@@ -52,29 +52,50 @@ func New(addr, password string, db int) (*Publisher, error) {
 	return &Publisher{client: client}, nil
 }
 
-// Publish sends payload to the given channel. Failures are logged with
-// throttling and returned; the caller drops the line — log loss is accepted
-// over buffering, and go-redis reconnects automatically on the next call.
-func (p *Publisher) Publish(ctx context.Context, channel string, payload []byte) error {
-	receivers, err := p.client.Publish(ctx, channel, payload).Result()
-	if err != nil {
-		p.logFailure(channel, err)
-		return err
+// PublishBatch sends payloads to the given channel in one pipelined round
+// trip and returns how many Redis accepted. Failures are logged with
+// throttling; failed lines are dropped — log loss is accepted over
+// buffering, and go-redis reconnects automatically on the next call.
+func (p *Publisher) PublishBatch(ctx context.Context, channel string, payloads [][]byte) int {
+	pipe := p.client.Pipeline()
+	cmds := make([]*redis.IntCmd, len(payloads))
+	for i, payload := range payloads {
+		cmds[i] = pipe.Publish(ctx, channel, payload)
 	}
-	if receivers == 0 {
-		p.logNoSubscribers(channel)
+	_, _ = pipe.Exec(ctx) // per-command errors are inspected below
+
+	var shipped, failed, noSubs int64
+	var firstErr error
+	for _, cmd := range cmds {
+		if err := cmd.Err(); err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		shipped++
+		if cmd.Val() == 0 {
+			noSubs++
+		}
 	}
-	return nil
+	if failed > 0 {
+		p.logFailure(channel, failed, firstErr)
+	}
+	if noSubs > 0 {
+		p.logNoSubscribers(channel, noSubs)
+	}
+	return int(shipped)
 }
 
 func (p *Publisher) Close() error {
 	return p.client.Close()
 }
 
-func (p *Publisher) logFailure(channel string, err error) {
+func (p *Publisher) logFailure(channel string, count int64, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.failures++
+	p.failures += count
 	if time.Since(p.lastErrLog) >= errLogInterval {
 		slog.Error("Redis publish failing",
 			"channel", channel,
@@ -88,10 +109,10 @@ func (p *Publisher) logFailure(channel string, err error) {
 
 // Pub/Sub has no persistence: a publish with zero subscribers silently
 // discards the message, so a down consumer is only visible here.
-func (p *Publisher) logNoSubscribers(channel string) {
+func (p *Publisher) logNoSubscribers(channel string, count int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.noSubs++
+	p.noSubs += count
 	if time.Since(p.lastSubLog) >= noSubLogInterval {
 		slog.Warn("No subscribers on channel, messages are being discarded",
 			"channel", channel,
