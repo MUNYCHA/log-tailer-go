@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -33,14 +36,19 @@ func ResolvePath(args []string) string {
 }
 
 func Load(path string) (*AppConfig, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open config file %q: %w", path, err)
 	}
-	defer f.Close()
 
 	var cfg AppConfig
-	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+	switch ext := strings.ToLower(filepath.Ext(path)); ext {
+	case ".yaml", ".yml":
+		err = yaml.UnmarshalStrict(data, &cfg)
+	default:
+		err = json.Unmarshal(data, &cfg)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("cannot parse config file %q: %w", path, err)
 	}
 

@@ -15,6 +15,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Auto-reconnects if Redis goes down mid-run; publish failures are logged with throttling and memory stays flat (nothing is buffered)
 - Warns (throttled) when a channel has zero subscribers, so a down consumer is visible in the journal
 - Structured logging via `log/slog`
+- Config file may be JSON or YAML, auto-detected by extension
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Project Structure
@@ -25,7 +26,8 @@ log-tailer-go/
 ├── config/
 │   ├── config.go        — config structs and validation
 │   ├── loader.go        — config loading and path resolution
-│   └── config.example.json
+│   ├── config.example.json
+│   └── config.example.yaml
 ├── model/
 │   └── event.go         — LogEvent JSON structure
 ├── redis/
@@ -54,10 +56,14 @@ Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all 
 
 ## Configuration
 
+Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields.
+
 Copy the sample config and fill in your values:
 
 ```bash
 cp config/config.example.json config/config.json
+# or, for YAML:
+cp config/config.example.yaml config/config.yaml
 ```
 
 | Field | Description |
