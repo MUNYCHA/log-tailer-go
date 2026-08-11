@@ -120,6 +120,9 @@ The unit fences the service hard:
 - `MemoryMax=64M` + `MemorySwapMax=0` — hard memory ceiling (includes page cache), no swap
 - `CPUQuota=25%` + `Nice=10` — at most a quarter of one core, yields to everything else
 - `ProtectSystem=strict` + `NoNewPrivileges` — entire filesystem is read-only to the process, kernel-enforced
+- `ProtectHome=read-only` + `PrivateTmp` — home directories are inaccessible, `/tmp` is isolated from the rest of the system
+- `ProtectKernelTunables` + `ProtectControlGroups` + `RestrictSUIDSGID` — no writing to `/proc/sys` or the cgroup hierarchy, can't create setuid/setgid files
 - `Restart=on-failure` + `RestartSec=5` — self-heals indefinitely, including when Redis is down at boot
+- `TimeoutStopSec=20` — bounded shutdown window before systemd force-kills the process
 
 > No JVM flags needed — Go binaries use only what they need.
