@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/metrics"
 	"log-tailer-go/redis"
 	"log-tailer-go/tailer"
 )
@@ -33,9 +34,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !cfg.LogTailer.Enabled {
-		slog.Error("logTailer is not enabled in config, nothing to do")
+	if !cfg.LogTailer.Enabled && !cfg.Metrics.Enabled {
+		slog.Error("Neither logTailer nor metrics is enabled in config, nothing to do")
 		os.Exit(1)
+	}
+
+	var metricsInterval time.Duration
+	if cfg.Metrics.Enabled {
+		metricsInterval, err = time.ParseDuration(cfg.Metrics.Interval)
+		if err != nil {
+			slog.Error("Failed to parse metrics.interval", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Retry until Redis is reachable so a bare (non-systemd) run survives
@@ -53,27 +63,18 @@ func main() {
 	var wg sync.WaitGroup
 	serverName := cfg.Identity.Server.Name
 
-	for _, f := range cfg.LogTailer.Files {
-		wg.Add(1)
-		go func(f config.LogFileConfig) {
-			defer wg.Done()
-			for ctx.Err() == nil {
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							slog.Error("Tailer panicked, restarting", "path", f.Path, "panic", r)
-						}
-					}()
-					tailer.New(f.Path, f.Channel, serverName, publisher).Run(ctx)
-				}()
-				// Pause before restart so a repeatedly-panicking tailer
-				// cannot spin at full speed
-				select {
-				case <-ctx.Done():
-				case <-time.After(restartDelay):
-				}
-			}
-		}(f)
+	if cfg.LogTailer.Enabled {
+		for _, f := range cfg.LogTailer.Files {
+			runSupervised(ctx, &wg, "tailer:"+f.Path, func(ctx context.Context) {
+				tailer.New(f.Path, f.Channel, serverName, publisher).Run(ctx)
+			})
+		}
+	}
+
+	if cfg.Metrics.Enabled {
+		runSupervised(ctx, &wg, "metrics", func(ctx context.Context) {
+			metrics.New(cfg.Metrics.Mounts, cfg.Metrics.Channel, serverName, metricsInterval, publisher).Run(ctx)
+		})
 	}
 
 	// Block until SIGTERM or SIGINT
@@ -92,4 +93,28 @@ func main() {
 	}
 
 	slog.Info("Shutdown complete")
+}
+
+// runSupervised starts run in its own goroutine, restarting it after a panic
+// (with restartDelay pause so a crash loop can't spin hot) until ctx is
+// cancelled. wg is released only once the goroutine has fully exited.
+func runSupervised(ctx context.Context, wg *sync.WaitGroup, name string, run func(context.Context)) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("Component panicked, restarting", "component", name, "panic", r)
+					}
+				}()
+				run(ctx)
+			}()
+			select {
+			case <-ctx.Done():
+			case <-time.After(restartDelay):
+			}
+		}
+	}()
 }

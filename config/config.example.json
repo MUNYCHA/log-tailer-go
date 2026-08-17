@@ -22,5 +22,12 @@
       { "path": "/var/log/app/app.log", "channel": "your-channel-1" },
       { "path": "/var/log/app/error.log", "channel": "your-channel-2" }
     ]
+  },
+
+  "metrics": {
+    "enabled": false,
+    "channel": "your-metrics-channel",
+    "interval": "1m",
+    "mounts": ["/", "/var/log"]
   }
 }

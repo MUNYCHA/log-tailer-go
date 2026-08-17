@@ -16,6 +16,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Warns (throttled) when a channel has zero subscribers, so a down consumer is visible in the journal
 - Structured logging via `log/slog`
 - Config file may be JSON or YAML, auto-detected by extension
+- Optional metrics collector publishes mount disk usage + server uptime as a combined JSON event on a timer, independent of log tailing
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Project Structure
@@ -34,6 +35,8 @@ log-tailer-go/
 │   └── publisher.go     — Redis Pub/Sub publisher
 ├── tailer/
 │   └── tailer.go        — core file tailing logic
+├── metrics/
+│   └── metrics.go       — mount usage + server uptime collector
 └── deploy/
     └── log-tailer-go.service — systemd unit for production
 ```
@@ -53,6 +56,24 @@ Each log line is published as a JSON object:
 ```
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
+
+### Metrics
+
+When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk usage for the configured mounts is published to `metrics.channel` every `metrics.interval`:
+
+```json
+{
+  "serverName": "your-server-name",
+  "timestamp": "2026-05-28T10:00:00Z",
+  "uptimeSeconds": 435600,
+  "mounts": [
+    { "path": "/", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151234567890, "usedPercent": 24.4 },
+    { "path": "/var/log", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9448931328, "usedPercent": 10.0 }
+  ]
+}
+```
+
+A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field instead of numeric fields; the rest of the mounts still publish normally. This collector runs independently of `logTailer` — either can be enabled on its own.
 
 ## Configuration
 
@@ -77,6 +98,10 @@ cp config/config.example.yaml config/config.yaml
 | `identity.server.ip` | Server IP address |
 | `logTailer.enabled` | Enable or disable the tailer |
 | `logTailer.files` | List of `{ path, channel }` entries to tail |
+| `metrics.enabled` | Enable or disable the metrics collector |
+| `metrics.channel` | Redis Pub/Sub channel for metrics events |
+| `metrics.interval` | Collection interval, as a Go duration string (e.g. `"1m"`, `"30s"`) |
+| `metrics.mounts` | List of mount paths to report disk usage for |
 
 ## Build
 

@@ -1,11 +1,15 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type AppConfig struct {
 	Redis     RedisConfig     `json:"redis"`
 	Identity  IdentityConfig  `json:"identity"`
 	LogTailer LogTailerConfig `json:"logTailer"`
+	Metrics   MetricsConfig   `json:"metrics"`
 }
 
 type RedisConfig struct {
@@ -39,6 +43,13 @@ type LogFileConfig struct {
 	Channel string `json:"channel"`
 }
 
+type MetricsConfig struct {
+	Enabled  bool     `json:"enabled"`
+	Channel  string   `json:"channel"`
+	Interval string   `json:"interval"` // e.g. "1m", "30s" — parsed with time.ParseDuration
+	Mounts   []string `json:"mounts"`
+}
+
 func (c *AppConfig) Validate() error {
 	if c.Redis.Addr == "" {
 		return fmt.Errorf("'redis.addr' is required")
@@ -62,6 +73,22 @@ func (c *AppConfig) Validate() error {
 			}
 			if f.Channel == "" {
 				return fmt.Errorf("each 'logTailer.files' entry must have a 'channel'")
+			}
+		}
+	}
+	if c.Metrics.Enabled {
+		if c.Metrics.Channel == "" {
+			return fmt.Errorf("'metrics.channel' is required")
+		}
+		if d, err := time.ParseDuration(c.Metrics.Interval); err != nil || d <= 0 {
+			return fmt.Errorf("'metrics.interval' must be a positive duration (e.g. \"1m\")")
+		}
+		if len(c.Metrics.Mounts) == 0 {
+			return fmt.Errorf("'metrics.mounts' must not be empty when enabled")
+		}
+		for _, m := range c.Metrics.Mounts {
+			if m == "" {
+				return fmt.Errorf("each 'metrics.mounts' entry must be non-empty")
 			}
 		}
 	}
