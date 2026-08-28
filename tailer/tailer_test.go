@@ -11,9 +11,16 @@ import (
 	"testing"
 	"time"
 
+	"log-tailer-go/config"
 	"log-tailer-go/model"
 	"log-tailer-go/tailer"
 )
+
+// testIdentity is the identity every tailer under test publishes with.
+var testIdentity = config.IdentityConfig{
+	System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
+	Server: config.ServerIdentity{Name: "test-server", IP: "10.0.0.5"},
+}
 
 // Timeouts are generous because the tests run against the tailer's real
 // timing constants (200 ms poll, 1 s retries, ~5 s rotation check) — no
@@ -85,7 +92,7 @@ func startTailer(t *testing.T, path string, pub *fakePublisher) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tailer.New(path, "test-channel", "test-server", pub).Run(ctx)
+		tailer.New(path, "test-channel", testIdentity, pub).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -163,8 +170,17 @@ func TestEventFields(t *testing.T) {
 	pub.waitForMessages(t, 1, fastWait)
 
 	ev := pub.allEvents()[0]
+	if ev.SystemID != "prod-cluster" {
+		t.Errorf("SystemID = %q, want %q", ev.SystemID, "prod-cluster")
+	}
+	if ev.SystemName != "Production" {
+		t.Errorf("SystemName = %q, want %q", ev.SystemName, "Production")
+	}
 	if ev.ServerName != "test-server" {
 		t.Errorf("ServerName = %q, want %q", ev.ServerName, "test-server")
+	}
+	if ev.ServerIP != "10.0.0.5" {
+		t.Errorf("ServerIP = %q, want %q", ev.ServerIP, "10.0.0.5")
 	}
 	if ev.Path != path {
 		t.Errorf("Path = %q, want %q", ev.Path, path)
@@ -428,7 +444,7 @@ func TestShutdownStopsPromptly(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tailer.New(path, "test-channel", "test-server", pub).Run(ctx)
+		tailer.New(path, "test-channel", testIdentity, pub).Run(ctx)
 	}()
 	waitForOpen()
 

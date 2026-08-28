@@ -61,12 +61,11 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
-	serverName := cfg.Identity.Server.Name
 
 	if cfg.LogTailer.Enabled {
 		for _, f := range cfg.LogTailer.Files {
 			runSupervised(ctx, &wg, "tailer:"+f.Path, func(ctx context.Context) {
-				tailer.New(f.Path, f.Channel, serverName, publisher).Run(ctx)
+				tailer.New(f.Path, f.Channel, cfg.Identity, publisher).Run(ctx)
 			})
 		}
 	}

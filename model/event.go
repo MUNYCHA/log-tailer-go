@@ -1,7 +1,10 @@
 package model
 
 type LogEvent struct {
+	SystemID   string `json:"systemId"`
+	SystemName string `json:"systemName"`
 	ServerName string `json:"serverName"`
+	ServerIP   string `json:"serverIp"`
 	Path       string `json:"path"`
 	Channel    string `json:"channel"`
 	Timestamp  string `json:"timestamp"`

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"log-tailer-go/config"
 	"log-tailer-go/model"
 )
 
@@ -31,21 +32,21 @@ type Publisher interface {
 }
 
 type Tailer struct {
-	path       string
-	channel    string
-	serverName string
-	publisher  Publisher
-	buf        [readBufSize]byte // reused per read, no per-poll allocation
-	batch      [][]byte          // payloads pending publish; reused, bounded by lines per read chunk
-	shipped    int64             // lines shipped since last heartbeat; touched only by the Run goroutine
+	path      string
+	channel   string
+	identity  config.IdentityConfig
+	publisher Publisher
+	buf       [readBufSize]byte // reused per read, no per-poll allocation
+	batch     [][]byte          // payloads pending publish; reused, bounded by lines per read chunk
+	shipped   int64             // lines shipped since last heartbeat; touched only by the Run goroutine
 }
 
-func New(path, channel, serverName string, publisher Publisher) *Tailer {
+func New(path, channel string, identity config.IdentityConfig, publisher Publisher) *Tailer {
 	return &Tailer{
-		path:       path,
-		channel:    channel,
-		serverName: serverName,
-		publisher:  publisher,
+		path:      path,
+		channel:   channel,
+		identity:  identity,
+		publisher: publisher,
 	}
 }
 
@@ -277,7 +278,10 @@ func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 // appendEvent serializes line into a LogEvent and adds it to the pending batch.
 func (t *Tailer) appendEvent(line string) {
 	event := model.LogEvent{
-		ServerName: t.serverName,
+		SystemID:   t.identity.System.ID,
+		SystemName: t.identity.System.Name,
+		ServerName: t.identity.Server.Name,
+		ServerIP:   t.identity.Server.IP,
 		Path:       t.path,
 		Channel:    t.channel,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),

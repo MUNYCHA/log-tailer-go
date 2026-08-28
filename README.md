@@ -50,13 +50,18 @@ Each log line is published as a JSON object:
 
 ```json
 {
+  "systemId": "your-system-id",
+  "systemName": "your-system-name",
   "serverName": "your-server-name",
+  "serverIp": "10.0.0.5",
   "path": "/var/log/app/app.log",
   "channel": "your-channel-1",
   "timestamp": "2026-05-28T10:00:00Z",
   "message": "the raw log line"
 }
 ```
+
+Both event types open with the same four identity fields in the same order, so a consumer extracts identity the same way on either channel. `systemId` is the stable key to group or join on — it never changes for a given system, while `systemName` and `serverIp` may change and are refreshed from every event.
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
 
@@ -102,10 +107,10 @@ cp config/config.example.yaml config/config.yaml
 | `redis.addr` | Redis address (`host:port`) |
 | `redis.password` | Redis password (empty for none) |
 | `redis.db` | Redis database number (Pub/Sub ignores it; kept for client completeness) |
-| `identity.system.id` | Unique system identifier (stable; included in each metrics event as `systemId`) |
-| `identity.system.name` | System display name (included in each metrics event as `systemName`) |
-| `identity.server.name` | Server hostname (included in each event as `serverName`) |
-| `identity.server.ip` | Server IP address (included in each metrics event as `serverIp`) |
+| `identity.system.id` | Unique system identifier (stable; published in every event as `systemId`) |
+| `identity.system.name` | System display name (published in every event as `systemName`) |
+| `identity.server.name` | Server hostname (published in every event as `serverName`) |
+| `identity.server.ip` | Server IP address (published in every event as `serverIp`) |
 | `logTailer.enabled` | Enable or disable the tailer |
 | `logTailer.files` | List of `{ path, channel }` entries to tail |
 | `metrics.enabled` | Enable or disable the metrics collector |
