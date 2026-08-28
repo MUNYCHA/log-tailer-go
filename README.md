@@ -63,7 +63,10 @@ When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk 
 
 ```json
 {
+  "systemId": "your-system-id",
+  "systemName": "your-system-name",
   "serverName": "your-server-name",
+  "serverIp": "10.0.0.5",
   "timestamp": "2026-05-28T10:00:00Z",
   "uptimeSeconds": 435600,
   "mounts": [
@@ -73,7 +76,7 @@ When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk 
 }
 ```
 
-A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field instead of numeric fields; the rest of the mounts still publish normally. This collector runs independently of `logTailer` — either can be enabled on its own.
+A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. This collector runs independently of `logTailer` — either can be enabled on its own.
 
 ## Configuration
 
@@ -92,10 +95,10 @@ cp config/config.example.yaml config/config.yaml
 | `redis.addr` | Redis address (`host:port`) |
 | `redis.password` | Redis password (empty for none) |
 | `redis.db` | Redis database number (Pub/Sub ignores it; kept for client completeness) |
-| `identity.system.id` | Unique system identifier |
-| `identity.system.name` | System display name |
-| `identity.server.name` | Server hostname (included in each event) |
-| `identity.server.ip` | Server IP address |
+| `identity.system.id` | Unique system identifier (stable; included in each metrics event as `systemId`) |
+| `identity.system.name` | System display name (included in each metrics event as `systemName`) |
+| `identity.server.name` | Server hostname (included in each event as `serverName`) |
+| `identity.server.ip` | Server IP address (included in each metrics event as `serverIp`) |
 | `logTailer.enabled` | Enable or disable the tailer |
 | `logTailer.files` | List of `{ path, channel }` entries to tail |
 | `metrics.enabled` | Enable or disable the metrics collector |
