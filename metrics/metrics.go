@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"log-tailer-go/config"
 	"log-tailer-go/model"
 )
 
@@ -22,20 +23,20 @@ type Publisher interface {
 }
 
 type Collector struct {
-	mounts     []string
-	channel    string
-	serverName string
-	interval   time.Duration
-	publisher  Publisher
+	mounts    []string
+	channel   string
+	identity  config.IdentityConfig
+	interval  time.Duration
+	publisher Publisher
 }
 
-func New(mounts []string, channel, serverName string, interval time.Duration, publisher Publisher) *Collector {
+func New(mounts []string, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
 	return &Collector{
-		mounts:     mounts,
-		channel:    channel,
-		serverName: serverName,
-		interval:   interval,
-		publisher:  publisher,
+		mounts:    mounts,
+		channel:   channel,
+		identity:  identity,
+		interval:  interval,
+		publisher: publisher,
 	}
 }
 
@@ -70,7 +71,10 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	}
 
 	event := model.MetricsEvent{
-		ServerName:    c.serverName,
+		SystemID:      c.identity.System.ID,
+		SystemName:    c.identity.System.Name,
+		ServerName:    c.identity.Server.Name,
+		ServerIP:      c.identity.Server.IP,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 		UptimeSeconds: uptime,
 		Mounts:        mounts,

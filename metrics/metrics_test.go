@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"log-tailer-go/config"
 	"log-tailer-go/model"
 )
 
@@ -84,7 +85,11 @@ func (p *fakePublisher) events() []model.MetricsEvent {
 
 func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	pub := &fakePublisher{}
-	c := New([]string{"/", "/this/path/does/not/exist/hopefully"}, "metrics-channel", "server-1", 10*time.Millisecond, pub)
+	identity := config.IdentityConfig{
+		System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
+		Server: config.ServerIdentity{Name: "server-1", IP: "10.0.0.5"},
+	}
+	c := New([]string{"/", "/this/path/does/not/exist/hopefully"}, "metrics-channel", identity, 10*time.Millisecond, pub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -96,8 +101,17 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	}
 
 	ev := events[0]
+	if ev.SystemID != "prod-cluster" {
+		t.Fatalf("expected systemId 'prod-cluster', got %q", ev.SystemID)
+	}
+	if ev.SystemName != "Production" {
+		t.Fatalf("expected systemName 'Production', got %q", ev.SystemName)
+	}
 	if ev.ServerName != "server-1" {
 		t.Fatalf("expected serverName 'server-1', got %q", ev.ServerName)
+	}
+	if ev.ServerIP != "10.0.0.5" {
+		t.Fatalf("expected serverIp '10.0.0.5', got %q", ev.ServerIP)
 	}
 	if len(ev.Mounts) != 2 {
 		t.Fatalf("expected 2 mounts in event, got %d", len(ev.Mounts))

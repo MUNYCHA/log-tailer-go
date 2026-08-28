@@ -73,7 +73,7 @@ func main() {
 
 	if cfg.Metrics.Enabled {
 		runSupervised(ctx, &wg, "metrics", func(ctx context.Context) {
-			metrics.New(cfg.Metrics.Mounts, cfg.Metrics.Channel, serverName, metricsInterval, publisher).Run(ctx)
+			metrics.New(cfg.Metrics.Mounts, cfg.Metrics.Channel, cfg.Identity, metricsInterval, publisher).Run(ctx)
 		})
 	}
 

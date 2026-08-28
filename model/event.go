@@ -9,7 +9,10 @@ type LogEvent struct {
 }
 
 type MetricsEvent struct {
+	SystemID      string       `json:"systemId"`
+	SystemName    string       `json:"systemName"`
 	ServerName    string       `json:"serverName"`
+	ServerIP      string       `json:"serverIp"`
 	Timestamp     string       `json:"timestamp"`
 	UptimeSeconds int64        `json:"uptimeSeconds"`
 	Mounts        []MountUsage `json:"mounts"`
