@@ -132,15 +132,18 @@ go build -o log-tailer-go .
 
 # specify config path explicitly (--config=PATH or --config PATH)
 ./log-tailer-go --config=/etc/log-tailer-go/config.json
+./log-tailer-go --config=/etc/log-tailer-go/config.yaml
 
 # or as a positional argument
-./log-tailer-go /etc/log-tailer-go/config.json
+./log-tailer-go /etc/log-tailer-go/config.yaml
 
 # via environment variable
-LOGTAILER_CONFIG=/etc/log-tailer-go/config.json ./log-tailer-go
+LOGTAILER_CONFIG=/etc/log-tailer-go/config.yaml ./log-tailer-go
 ```
 
-Priority: command-line argument (flag or positional) > `LOGTAILER_CONFIG` env var > default path.
+Priority: command-line argument (flag or positional) > `LOGTAILER_CONFIG` env var > default path. The default is JSON only — a YAML config always needs its path given explicitly, by any of the three means above.
+
+There is no `--help` or `--version`; an unrecognized flag is ignored rather than reported, so a typo'd flag starts the service on the default config instead of failing.
 
 ## Production Deployment (systemd)
 
@@ -154,6 +157,26 @@ sudo cp deploy/log-tailer-go.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now log-tailer-go
 ```
+
+### Deploying with a YAML config
+
+The format is chosen by the file extension, so a YAML deployment is the same steps with the config path changed in `ExecStart=`. Copy the YAML config instead, and point the unit at it before reloading:
+
+```bash
+sudo mkdir -p /opt/log-tailer-go /etc/log-tailer-go
+sudo cp log-tailer-go /opt/log-tailer-go/
+sudo cp config/config.yaml /etc/log-tailer-go/
+sudo cp deploy/log-tailer-go.service /etc/systemd/system/
+
+# point the unit at the YAML config
+sudo sed -i 's|--config=/etc/log-tailer-go/config.json|--config=/etc/log-tailer-go/config.yaml|' \
+  /etc/systemd/system/log-tailer-go.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now log-tailer-go
+```
+
+Renaming the file alone is not enough — the path in `ExecStart=` is what selects the parser, and a `.yaml` file left at the `.json` path is parsed as JSON and fails at startup. Keep exactly one config in `/etc/log-tailer-go/` so there is no question which one is live. Remember that YAML is parsed strictly: a misspelled key stops the service rather than being ignored, which `journalctl -u log-tailer-go` reports as a config parse error.
 
 The unit fences the service hard:
 
