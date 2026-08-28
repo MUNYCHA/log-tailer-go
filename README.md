@@ -9,7 +9,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Publishes each line as a JSON event to a Redis Pub/Sub channel
 - Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
 - Bursts are published as pipelined batches (one round trip per 64 KB read chunk), sustaining 50k+ lines/s per file while staying synchronous — no internal queues
-- Per-file tailers recover from panics and restart automatically (1 s delay so a crash loop can't spin hot)
+- Every component — each per-file tailer and the metrics collector — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
 - Heartbeat log every 5 minutes per file with lines shipped — silent zero-shipping is visible in the journal
 - Waits for Redis at startup — retries every 5 s instead of exiting, so it also self-heals when run without systemd
 - Auto-reconnects if Redis goes down mid-run; publish failures are logged with throttling and memory stays flat (nothing is buffered)
@@ -27,16 +27,19 @@ log-tailer-go/
 ├── config/
 │   ├── config.go        — config structs and validation
 │   ├── loader.go        — config loading and path resolution
+│   ├── config_test.go
 │   ├── config.example.json
 │   └── config.example.yaml
 ├── model/
-│   └── event.go         — LogEvent JSON structure
+│   └── event.go         — LogEvent and MetricsEvent JSON structures
 ├── redis/
 │   └── publisher.go     — Redis Pub/Sub publisher
 ├── tailer/
-│   └── tailer.go        — core file tailing logic
+│   ├── tailer.go        — core file tailing logic
+│   └── tailer_test.go
 ├── metrics/
-│   └── metrics.go       — mount usage + server uptime collector
+│   ├── metrics.go       — mount usage + server uptime collector
+│   └── metrics_test.go
 └── deploy/
     └── log-tailer-go.service — systemd unit for production
 ```
@@ -57,6 +60,8 @@ Each log line is published as a JSON object:
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
 
+`message` is the raw line with its trailing newline removed; a BOM and any `\r` are stripped, but leading and trailing spaces are preserved so indented stack traces survive intact. Empty lines are skipped entirely (a whitespace-only line is still published). A line longer than 1 MB is published as a 1 MB chunk and the remainder continues in the next event, so a runaway line can't grow the buffer without bound.
+
 ### Metrics
 
 When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk usage for the configured mounts is published to `metrics.channel` every `metrics.interval`:
@@ -76,11 +81,13 @@ When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk 
 }
 ```
 
-A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. This collector runs independently of `logTailer` — either can be enabled on its own.
+A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. If server uptime can't be read, the whole tick is skipped and no event is published for that interval — expect an occasional gap rather than an event with a zero uptime. This collector runs independently of `logTailer` — either can be enabled on its own.
 
 ## Configuration
 
-Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields.
+Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
+
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr`, `identity.system.id`, `identity.system.name` and `identity.server.name` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, and `metrics.channel`, a positive `metrics.interval` and a non-empty `metrics.mounts` when the collector is enabled. `identity.server.ip` is optional and publishes as an empty string if omitted. Enabling neither `logTailer` nor `metrics` is also an error — there would be nothing to do.
 
 Copy the sample config and fill in your values:
 
@@ -118,7 +125,7 @@ go build -o log-tailer-go .
 # uses config/config.json by default
 ./log-tailer-go
 
-# specify config path explicitly
+# specify config path explicitly (--config=PATH or --config PATH)
 ./log-tailer-go --config=/etc/log-tailer-go/config.json
 
 # or as a positional argument
