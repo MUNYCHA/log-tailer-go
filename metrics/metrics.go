@@ -14,7 +14,12 @@ import (
 	"log-tailer-go/model"
 )
 
-const uptimePath = "/proc/uptime"
+const (
+	uptimePath  = "/proc/uptime"
+	loadavgPath = "/proc/loadavg"
+	meminfoPath = "/proc/meminfo"
+	statPath    = "/proc/stat"
+)
 
 // Publisher ships a batch of serialized events to a pub/sub channel in one
 // pipelined round trip, returning how many were accepted.
@@ -28,6 +33,11 @@ type Collector struct {
 	identity  config.IdentityConfig
 	interval  time.Duration
 	publisher Publisher
+
+	// Previous /proc/stat reading, differenced against the next one to get
+	// cpuPercent. Nil until the first tick has been taken. Only ever touched
+	// from Run's goroutine, so it needs no lock.
+	prevCPU *cpuSample
 }
 
 func New(mounts []string, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
@@ -65,11 +75,6 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 		return
 	}
 
-	mounts := make([]model.MountUsage, len(c.mounts))
-	for i, path := range c.mounts {
-		mounts[i] = statMount(path)
-	}
-
 	event := model.MetricsEvent{
 		SystemID:      c.identity.System.ID,
 		SystemName:    c.identity.System.Name,
@@ -77,8 +82,17 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 		ServerIP:      c.identity.Server.IP,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 		UptimeSeconds: uptime,
-		Mounts:        mounts,
 	}
+	c.addLoadAvg(&event)
+	c.addMemInfo(&event)
+	c.addCPUPercent(&event)
+
+	mounts := make([]model.MountUsage, len(c.mounts))
+	for i, path := range c.mounts {
+		mounts[i] = statMount(path)
+	}
+
+	event.Mounts = mounts
 
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -87,6 +101,67 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	}
 
 	c.publisher.PublishBatch(ctx, c.channel, [][]byte{payload})
+}
+
+// addLoadAvg fills load1/5/15, leaving all three unset if /proc/loadavg is
+// unreadable — a group is reported whole or not at all.
+func (c *Collector) addLoadAvg(event *model.MetricsEvent) {
+	data, err := os.ReadFile(loadavgPath)
+	if err == nil {
+		var load loadAvg
+		if load, err = parseLoadavg(data); err == nil {
+			event.Load1 = ptr(load.one)
+			event.Load5 = ptr(load.five)
+			event.Load15 = ptr(load.fifteen)
+			return
+		}
+	}
+	slog.Warn("Failed to read load average, omitting from this tick", "path", loadavgPath, "error", err)
+}
+
+func (c *Collector) addMemInfo(event *model.MetricsEvent) {
+	data, err := os.ReadFile(meminfoPath)
+	if err == nil {
+		var mem memInfo
+		if mem, err = parseMeminfo(data); err == nil {
+			event.MemTotalBytes = ptr(mem.totalBytes)
+			event.MemAvailableBytes = ptr(mem.availableBytes)
+			event.SwapTotalBytes = ptr(mem.swapTotalBytes)
+			event.SwapUsedBytes = ptr(mem.swapUsedBytes)
+			return
+		}
+	}
+	slog.Warn("Failed to read memory info, omitting from this tick", "path", meminfoPath, "error", err)
+}
+
+// addCPUPercent differences this tick's /proc/stat against the previous one,
+// so the value is the mean over the whole interval rather than an instant.
+// The first tick has nothing to difference against and omits the field.
+func (c *Collector) addCPUPercent(event *model.MetricsEvent) {
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		slog.Warn("Failed to read CPU stats, omitting from this tick", "path", statPath, "error", err)
+		return
+	}
+
+	now, err := parseStat(data)
+	if err != nil {
+		slog.Warn("Failed to parse CPU stats, omitting from this tick", "path", statPath, "error", err)
+		return
+	}
+
+	prev := c.prevCPU
+	c.prevCPU = &now
+	if prev == nil {
+		return
+	}
+	if pct, ok := cpuPercent(*prev, now); ok {
+		event.CPUPercent = ptr(pct)
+	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 func statMount(path string) model.MountUsage {
