@@ -90,7 +90,7 @@ func main() {
 	// stuck mount must not be able to stop the beat
 	if cfg.Heartbeat.IsEnabled() {
 		runSupervised(ctx, &wg, "heartbeat", func(ctx context.Context) {
-			heartbeat.New(cfg.Identity, heartbeatInterval, publisher).Run(ctx)
+			heartbeat.New(cfg.Identity, cfg.Heartbeat.Channel, heartbeatInterval, publisher).Run(ctx)
 		})
 	}
 

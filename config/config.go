@@ -56,6 +56,7 @@ type MetricsConfig struct {
 // it without being edited, while enabled: false stays available.
 type HeartbeatConfig struct {
 	Enabled  *bool  `json:"enabled"`
+	Channel  string `json:"channel"`  // omitted means DefaultHeartbeatChannel
 	Interval string `json:"interval"` // e.g. "10s" — parsed with time.ParseDuration
 }
 
@@ -68,9 +69,18 @@ func (h HeartbeatConfig) IsEnabled() bool {
 // coordinate a change with the API side before shipping it.
 const DefaultHeartbeatInterval = "10s"
 
+// The channel the consumer subscribes to. Overriding it per server is
+// supported but is a coordinated change: a name the subscriber does not know
+// is not an error, it is silence — Redis discards a publish nobody is
+// listening for, and the server then reads as offline while beating happily.
+const DefaultHeartbeatChannel = "agent-heartbeat"
+
 func (c *AppConfig) applyDefaults() {
 	if c.Heartbeat.Interval == "" {
 		c.Heartbeat.Interval = DefaultHeartbeatInterval
+	}
+	if c.Heartbeat.Channel == "" {
+		c.Heartbeat.Channel = DefaultHeartbeatChannel
 	}
 }
 

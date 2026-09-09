@@ -128,15 +128,17 @@ Because it needs two samples, `cpuPercent` is **omitted on the first tick after 
 
 ### Heartbeat
 
-When `heartbeat.enabled` is `true` (the default), a beat is published to the fixed channel `agent-heartbeat` every `heartbeat.interval`:
+When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — every `heartbeat.interval`:
 
 ```json
 { "systemId": "your-system-id", "serverName": "your-server-name" }
 ```
 
-That pair is the same identity the live metrics key is built from, so a beat maps to exactly one server. It is JSON rather than a bare id so a `serverName` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
+That pair is the same identity the live metrics key is built from, so a beat maps to exactly one server. Because every beat names its own sender, one channel carries the beats of every server in a fleet and the consumer tells them apart from the payload — a per-server channel is supported but not needed for that. It is JSON rather than a bare id so a `serverName` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
 
 The heartbeat is deliberately the dumbest component in the agent: it reads no files, stats no mounts and shares no state with the metrics collector, running on its own goroutine and its own ticker. If metrics collection wedges on a stuck mount, the beat keeps going — a beat that can stop for any reason other than the agent being dead is worse than no beat at all. Publishes are fire and forget: a failure is logged (throttled) and dropped, never retried, never allowed to delay the next beat.
+
+> **Changing `heartbeat.channel` is a coordinated change.** The consumer subscribes by name, and Redis discards a publish nobody is listening for. Point an agent at a channel the subscriber doesn't know and there is no error anywhere: the agent logs healthy beats, the consumer sees none, and the server reads as offline. Add the name on the subscriber side first — beats published before it subscribes are dropped, not queued.
 
 > **Changing `heartbeat.interval` is a coordinated change.** The consumer expires a server's heartbeat key on a TTL of roughly three beats (30s for the default 10s interval). Raising the interval past that TTL makes every healthy server read as offline — silently, and looking exactly like a broken agent. Tell the API side before changing it.
 
@@ -146,7 +148,7 @@ Config is JSON or YAML — picked automatically by the file's extension (`.json`
 
 The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr`, `identity.system.id`, `identity.system.name` and `identity.server.name` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, and `metrics.channel`, a positive `metrics.interval` and a non-empty `metrics.mounts` when the collector is enabled. `identity.server.ip` is optional and publishes as an empty string if omitted. Enabling nothing at all — no `logTailer`, no `metrics`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
 
-The whole `heartbeat` block is optional: omit it and the heartbeat runs at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
+The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
 Copy the sample config and fill in your values:
 
@@ -172,6 +174,7 @@ cp config/config.example.yaml config/config.yaml
 | `metrics.interval` | Collection interval, as a Go duration string (e.g. `"1m"`, `"30s"`) |
 | `metrics.mounts` | List of mount paths to report disk usage for |
 | `heartbeat.enabled` | Enable or disable the heartbeat (default `true` when the key or the whole block is omitted) |
+| `heartbeat.channel` | Channel beats are published to (default `"agent-heartbeat"`; an empty value falls back to it). Must match what the consumer subscribes to |
 | `heartbeat.interval` | Beat interval, as a Go duration string (default `"10s"`; must stay well under the consumer's TTL) |
 
 ## Build

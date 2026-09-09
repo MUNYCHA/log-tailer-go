@@ -28,5 +28,6 @@ metrics:
     - /var/log
 
 heartbeat:
-  enabled: true       # omit the whole block to get the same defaults
-  interval: 10s       # coordinate with the consumer's TTL before changing
+  enabled: true                 # omit the whole block to get the same defaults
+  channel: agent-heartbeat      # must match what the consumer subscribes to
+  interval: 10s                 # coordinate with the consumer's TTL before changing

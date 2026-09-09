@@ -33,6 +33,7 @@
 
   "heartbeat": {
     "enabled": true,
+    "channel": "agent-heartbeat",
     "interval": "10s"
   }
 }

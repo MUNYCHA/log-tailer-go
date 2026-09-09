@@ -42,11 +42,11 @@ func identity() config.IdentityConfig {
 	}
 }
 
-func TestEmitter_PublishesIdentityPairOnFixedChannel(t *testing.T) {
+func TestEmitter_PublishesIdentityPairOnConfiguredChannel(t *testing.T) {
 	pub := &fakePublisher{}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
 	defer cancel()
-	New(identity(), 10*time.Millisecond, pub).Run(ctx)
+	New(identity(), "agent-heartbeat", 10*time.Millisecond, pub).Run(ctx)
 
 	if pub.count() == 0 {
 		t.Fatal("expected at least one beat")
@@ -77,7 +77,7 @@ func TestEmitter_KeepsBeatingWhenPublishFails(t *testing.T) {
 	pub := &fakePublisher{fail: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Millisecond)
 	defer cancel()
-	New(identity(), 10*time.Millisecond, pub).Run(ctx)
+	New(identity(), "agent-heartbeat", 10*time.Millisecond, pub).Run(ctx)
 
 	// A rejected publish is logged and dropped, never retried and never
 	// allowed to stall the ticker
@@ -92,7 +92,7 @@ func TestEmitter_StopsOnContextCancel(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		New(identity(), 10*time.Millisecond, pub).Run(ctx)
+		New(identity(), "agent-heartbeat", 10*time.Millisecond, pub).Run(ctx)
 		close(done)
 	}()
 
@@ -101,5 +101,21 @@ func TestEmitter_StopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after context cancellation")
+	}
+}
+
+func TestEmitter_UsesTheConfiguredChannel(t *testing.T) {
+	pub := &fakePublisher{}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	New(identity(), "serverA-heartbeat", 10*time.Millisecond, pub).Run(ctx)
+
+	if pub.count() == 0 {
+		t.Fatal("expected at least one beat")
+	}
+	for i, ch := range pub.channels {
+		if ch != "serverA-heartbeat" {
+			t.Fatalf("beat %d went to %q, want the configured channel", i, ch)
+		}
 	}
 }

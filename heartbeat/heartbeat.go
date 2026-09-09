@@ -17,10 +17,6 @@ import (
 	"log-tailer-go/model"
 )
 
-// Channel is fixed rather than configured: the consumer subscribes to this
-// exact name, and a per-server override would only ever be a way to go silent.
-const Channel = "agent-heartbeat"
-
 // Publisher ships a batch of serialized events to a pub/sub channel in one
 // pipelined round trip, returning how many were accepted.
 type Publisher interface {
@@ -29,11 +25,15 @@ type Publisher interface {
 
 type Emitter struct {
 	payload   []byte
+	channel   string
 	interval  time.Duration
 	publisher Publisher
 }
 
-func New(identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Emitter {
+// New builds an emitter. channel comes from config and defaults to
+// config.DefaultHeartbeatChannel; it must match what the consumer subscribes
+// to, since a beat sent to an unwatched channel is discarded, not queued.
+func New(identity config.IdentityConfig, channel string, interval time.Duration, publisher Publisher) *Emitter {
 	// The payload never changes, and a struct of two strings cannot fail to
 	// marshal, so it is built once here — a tick then does nothing but publish
 	payload, _ := json.Marshal(model.HeartbeatEvent{
@@ -43,6 +43,7 @@ func New(identity config.IdentityConfig, interval time.Duration, publisher Publi
 
 	return &Emitter{
 		payload:   payload,
+		channel:   channel,
 		interval:  interval,
 		publisher: publisher,
 	}
@@ -52,7 +53,7 @@ func New(identity config.IdentityConfig, interval time.Duration, publisher Publi
 // fire and forget: PublishBatch logs its own failures (throttled) and nothing
 // is retried, so a Redis outage costs beats but never delays the next one.
 func (e *Emitter) Run(ctx context.Context) {
-	slog.Info("Starting heartbeat", "channel", Channel, "interval", e.interval)
+	slog.Info("Starting heartbeat", "channel", e.channel, "interval", e.interval)
 
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
@@ -62,7 +63,7 @@ func (e *Emitter) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.publisher.PublishBatch(ctx, Channel, [][]byte{e.payload})
+			e.publisher.PublishBatch(ctx, e.channel, [][]byte{e.payload})
 		}
 	}
 }
