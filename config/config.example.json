@@ -29,5 +29,10 @@
     "channel": "your-metrics-channel",
     "interval": "1m",
     "mounts": ["/", "/var/log"]
+  },
+
+  "heartbeat": {
+    "enabled": true,
+    "interval": "10s"
   }
 }

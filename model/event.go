@@ -49,3 +49,10 @@ type MountUsage struct {
 	UsedPercent float64 `json:"usedPercent"`
 	Error       string  `json:"error,omitempty"`
 }
+
+// HeartbeatEvent is the entire heartbeat payload: the same identity pair the
+// live metrics key is built from, so a beat maps to exactly one server.
+type HeartbeatEvent struct {
+	SystemID   string `json:"systemId"`
+	ServerName string `json:"serverName"`
+}

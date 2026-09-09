@@ -26,3 +26,7 @@ metrics:
   mounts:
     - /
     - /var/log
+
+heartbeat:
+  enabled: true       # omit the whole block to get the same defaults
+  interval: 10s       # coordinate with the consumer's TTL before changing
