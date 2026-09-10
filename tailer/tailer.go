@@ -56,10 +56,10 @@ func (t *Tailer) Run(ctx context.Context) {
 	slog.Info("Starting log tailer", "path", t.path, "channel", t.channel)
 
 	var (
-		f          *os.File
-		fileIno    uint64
-		offset     int64
-		lineBuffer bytes.Buffer
+		f             *os.File
+		fileIno       uint64
+		offset        int64
+		lineBuffer    bytes.Buffer
 		startAtEnd    = true // first open skips existing content
 		cycle         int
 		lastHeartbeat = time.Now()
