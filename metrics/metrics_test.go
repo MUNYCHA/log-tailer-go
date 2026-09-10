@@ -123,3 +123,60 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 		t.Fatal("expected the bad mount path to have an error set")
 	}
 }
+
+func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
+	pub := &fakePublisher{}
+	c := New([]string{"/"}, "metrics-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events()
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events to compare, got %d", len(events))
+	}
+	if events[0].CPUPercent != nil {
+		t.Fatalf("expected cpuPercent omitted on the first tick, got %f", *events[0].CPUPercent)
+	}
+	if events[1].CPUPercent == nil {
+		t.Fatal("expected cpuPercent on the second tick, got nil")
+	}
+	if pct := *events[1].CPUPercent; pct < 0 || pct > 100 {
+		t.Fatalf("expected cpuPercent in [0,100], got %f", pct)
+	}
+}
+
+func TestCollector_PublishesLoadAndMemoryFromRealProc(t *testing.T) {
+	pub := &fakePublisher{}
+	c := New([]string{"/"}, "metrics-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events()
+	if len(events) == 0 {
+		t.Fatal("expected at least one metrics event")
+	}
+
+	ev := events[0]
+	if ev.Load1 == nil || ev.Load5 == nil || ev.Load15 == nil {
+		t.Fatal("expected all three load figures to be present")
+	}
+	if ev.MemTotalBytes == nil || ev.MemAvailableBytes == nil {
+		t.Fatal("expected memory figures to be present")
+	}
+	if *ev.MemTotalBytes == 0 {
+		t.Fatal("expected a non-zero memTotalBytes")
+	}
+	if *ev.MemAvailableBytes > *ev.MemTotalBytes {
+		t.Fatalf("expected memAvailable <= memTotal, got %d > %d", *ev.MemAvailableBytes, *ev.MemTotalBytes)
+	}
+	if ev.SwapTotalBytes == nil || ev.SwapUsedBytes == nil {
+		t.Fatal("expected swap figures to be present")
+	}
+	if *ev.SwapUsedBytes > *ev.SwapTotalBytes {
+		t.Fatalf("expected swapUsed <= swapTotal, got %d > %d", *ev.SwapUsedBytes, *ev.SwapTotalBytes)
+	}
+}

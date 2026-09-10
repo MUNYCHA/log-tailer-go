@@ -10,6 +10,7 @@ type AppConfig struct {
 	Identity  IdentityConfig  `json:"identity"`
 	LogTailer LogTailerConfig `json:"logTailer"`
 	Metrics   MetricsConfig   `json:"metrics"`
+	Heartbeat HeartbeatConfig `json:"heartbeat"`
 }
 
 type RedisConfig struct {
@@ -50,7 +51,44 @@ type MetricsConfig struct {
 	Mounts   []string `json:"mounts"`
 }
 
+// HeartbeatConfig gates the liveness beat. Enabled is a pointer so an omitted
+// key means "on" — existing configs written before the heartbeat existed get
+// it without being edited, while enabled: false stays available.
+type HeartbeatConfig struct {
+	Enabled  *bool  `json:"enabled"`
+	Channel  string `json:"channel"`  // omitted means DefaultHeartbeatChannel
+	Interval string `json:"interval"` // e.g. "10s" — parsed with time.ParseDuration
+}
+
+func (h HeartbeatConfig) IsEnabled() bool {
+	return h.Enabled == nil || *h.Enabled
+}
+
+// The consumer expires a server's heartbeat key on a TTL of roughly three
+// beats. Raising this past that TTL makes healthy servers read as offline, so
+// coordinate a change with the API side before shipping it.
+const DefaultHeartbeatInterval = "10s"
+
+// The channel the consumer subscribes to. Overriding it per server is
+// supported but is a coordinated change: a name the subscriber does not know
+// is not an error, it is silence — Redis discards a publish nobody is
+// listening for, and the server then reads as offline while beating happily.
+const DefaultHeartbeatChannel = "agent-heartbeat"
+
+func (c *AppConfig) applyDefaults() {
+	if c.Heartbeat.Interval == "" {
+		c.Heartbeat.Interval = DefaultHeartbeatInterval
+	}
+	if c.Heartbeat.Channel == "" {
+		c.Heartbeat.Channel = DefaultHeartbeatChannel
+	}
+}
+
+// Validate fills in defaults for omitted optional keys, then reports the first
+// problem it finds.
 func (c *AppConfig) Validate() error {
+	c.applyDefaults()
+
 	if c.Redis.Addr == "" {
 		return fmt.Errorf("'redis.addr' is required")
 	}
@@ -90,6 +128,11 @@ func (c *AppConfig) Validate() error {
 			if m == "" {
 				return fmt.Errorf("each 'metrics.mounts' entry must be non-empty")
 			}
+		}
+	}
+	if c.Heartbeat.IsEnabled() {
+		if d, err := time.ParseDuration(c.Heartbeat.Interval); err != nil || d <= 0 {
+			return fmt.Errorf("'heartbeat.interval' must be a positive duration (e.g. \"10s\")")
 		}
 	}
 	return nil

@@ -9,14 +9,15 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Publishes each line as a JSON event to a Redis Pub/Sub channel
 - Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
 - Bursts are published as pipelined batches (one round trip per 64 KB read chunk), sustaining 50k+ lines/s per file while staying synchronous — no internal queues
-- Every component — each per-file tailer and the metrics collector — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
-- Heartbeat log every 5 minutes per file with lines shipped — silent zero-shipping is visible in the journal
+- Every component — each per-file tailer, the metrics collector and the heartbeat — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
+- Each tailer logs a liveness line to the journal every 5 minutes with its lines-shipped count — silent zero-shipping is visible without a subscriber (this is a journal log, unrelated to the `agent-heartbeat` channel below)
 - Waits for Redis at startup — retries every 5 s instead of exiting, so it also self-heals when run without systemd
 - Auto-reconnects if Redis goes down mid-run; publish failures are logged with throttling and memory stays flat (nothing is buffered)
 - Warns (throttled) when a channel has zero subscribers, so a down consumer is visible in the journal
 - Structured logging via `log/slog`
 - Config file may be JSON or YAML, auto-detected by extension
-- Optional metrics collector publishes mount disk usage + server uptime as a combined JSON event on a timer, independent of log tailing
+- Optional metrics collector publishes mount disk usage, server uptime, load average, memory/swap and CPU utilisation as a combined JSON event on a timer, independent of log tailing
+- Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collector, so a wedged metrics read can't make a healthy server look down
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Project Structure
@@ -31,15 +32,20 @@ log-tailer-go/
 │   ├── config.example.json
 │   └── config.example.yaml
 ├── model/
-│   └── event.go         — LogEvent and MetricsEvent JSON structures
+│   └── event.go         — LogEvent, MetricsEvent and HeartbeatEvent JSON structures
 ├── redis/
 │   └── publisher.go     — Redis Pub/Sub publisher
 ├── tailer/
 │   ├── tailer.go        — core file tailing logic
 │   └── tailer_test.go
 ├── metrics/
-│   ├── metrics.go       — mount usage + server uptime collector
+│   ├── metrics.go       — uptime, load, memory, CPU and mount usage collector
+│   ├── proc.go          — /proc/loadavg, /proc/meminfo and /proc/stat parsers
+│   ├── proc_test.go
 │   └── metrics_test.go
+├── heartbeat/
+│   ├── heartbeat.go     — fixed-interval liveness beat
+│   └── heartbeat_test.go
 └── deploy/
     └── log-tailer-go.service — systemd unit for production
 ```
@@ -61,7 +67,7 @@ Each log line is published as a JSON object:
 }
 ```
 
-Both event types open with the same four identity fields in the same order, so a consumer extracts identity the same way on either channel. `systemId` is the stable key to group or join on — it never changes for a given system, while `systemName` and `serverIp` may change and are refreshed from every event.
+Log and metrics events both open with the same four identity fields in the same order, so a consumer extracts identity the same way on either channel. `systemId` is the stable key to group or join on — it never changes for a given system, while `systemName` and `serverIp` may change and are refreshed from every event. The heartbeat is the exception: it carries only `systemId` and `serverName`, the pair that identifies a server, and nothing else.
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
 
@@ -69,7 +75,7 @@ Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all 
 
 ### Metrics
 
-When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk usage for the configured mounts is published to `metrics.channel` every `metrics.interval`:
+When `metrics.enabled` is `true`, a combined snapshot of server uptime, load average, memory and swap, CPU utilisation, and disk usage for the configured mounts is published to `metrics.channel` every `metrics.interval`:
 
 ```json
 {
@@ -79,6 +85,14 @@ When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk 
   "serverIp": "10.0.0.5",
   "timestamp": "2026-05-28T10:00:00Z",
   "uptimeSeconds": 435600,
+  "load1": 0.52,
+  "load5": 0.41,
+  "load15": 0.38,
+  "memTotalBytes": 16466874368,
+  "memAvailableBytes": 14146666496,
+  "swapTotalBytes": 4294967296,
+  "swapUsedBytes": 102400000,
+  "cpuPercent": 12.7,
   "mounts": [
     { "path": "/", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151234567890, "usedPercent": 24.4 },
     { "path": "/var/log", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9448931328, "usedPercent": 10.0 }
@@ -86,13 +100,55 @@ When `metrics.enabled` is `true`, a combined snapshot of server uptime and disk 
 }
 ```
 
-A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. If server uptime can't be read, the whole tick is skipped and no event is published for that interval — expect an occasional gap rather than an event with a zero uptime. This collector runs independently of `logTailer` — either can be enabled on its own.
+A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. This collector runs independently of `logTailer` — either can be enabled on its own.
+
+Every `/proc`-sourced field is **omitted from the JSON when it can't be read**, never sent as a zero: absent means "unknown", where `0` would read as a real measurement of an idle machine. Fields are omitted as a group, since a half-parsed file tells you nothing about which line survived:
+
+| Source | Fields | If the read or parse fails |
+|---|---|---|
+| `/proc/uptime` | `uptimeSeconds` | **The whole tick is skipped** — no event at all |
+| `/proc/loadavg` | `load1`, `load5`, `load15` | All three omitted, the tick still publishes |
+| `/proc/meminfo` | `memTotalBytes`, `memAvailableBytes`, `swapTotalBytes`, `swapUsedBytes` | All four omitted, the tick still publishes |
+| `/proc/stat` | `cpuPercent` | Omitted, the tick still publishes |
+
+`uptimeSeconds` is the exception because the consumer discards any message missing it — publishing that tick would only waste a round trip.
+
+Memory figures are bytes (`/proc/meminfo` reports kB, multiplied by 1024). `memAvailableBytes` is `MemAvailable`, not `MemFree`, so it accounts for reclaimable page cache. `swapUsedBytes` is `SwapTotal - SwapFree`.
+
+`cpuPercent` is the **mean busy percentage over the whole interval**, not an instantaneous reading — it differences two `/proc/stat` samples one `metrics.interval` apart:
+
+```
+busy = (total_now - total_prev) - (idle_now - idle_prev)
+pct  = 100 * busy / (total_now - total_prev)
+```
+
+`idle` counts both the `idle` and `iowait` columns, matching `top`: a server blocked on a dead NFS mount is waiting, not burning CPU, and reporting it as busy would send someone hunting the wrong problem. Load average is what surfaces that case, which is why `load1/5/15` are published alongside — the two numbers disagreeing is the signal.
+
+Because it needs two samples, `cpuPercent` is **omitted on the first tick after startup**, and again on the first tick after a supervised restart (the collector is rebuilt, so the previous sample is gone). It's also omitted if the counters move backwards, which is what a reboot between ticks looks like. A short spike inside a 1-minute interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
+
+### Heartbeat
+
+When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — every `heartbeat.interval`:
+
+```json
+{ "systemId": "your-system-id", "serverName": "your-server-name" }
+```
+
+That pair is the same identity the live metrics key is built from, so a beat maps to exactly one server. Because every beat names its own sender, one channel carries the beats of every server in a fleet and the consumer tells them apart from the payload — a per-server channel is supported but not needed for that. It is JSON rather than a bare id so a `serverName` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
+
+The heartbeat is deliberately the dumbest component in the agent: it reads no files, stats no mounts and shares no state with the metrics collector, running on its own goroutine and its own ticker. If metrics collection wedges on a stuck mount, the beat keeps going — a beat that can stop for any reason other than the agent being dead is worse than no beat at all. Publishes are fire and forget: a failure is logged (throttled) and dropped, never retried, never allowed to delay the next beat.
+
+> **Changing `heartbeat.channel` is a coordinated change.** The consumer subscribes by name, and Redis discards a publish nobody is listening for. Point an agent at a channel the subscriber doesn't know and there is no error anywhere: the agent logs healthy beats, the consumer sees none, and the server reads as offline. Add the name on the subscriber side first — beats published before it subscribes are dropped, not queued.
+
+> **Changing `heartbeat.interval` is a coordinated change.** The consumer expires a server's heartbeat key on a TTL of roughly three beats (30s for the default 10s interval). Raising the interval past that TTL makes every healthy server read as offline — silently, and looking exactly like a broken agent. Tell the API side before changing it.
 
 ## Configuration
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
-The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr`, `identity.system.id`, `identity.system.name` and `identity.server.name` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, and `metrics.channel`, a positive `metrics.interval` and a non-empty `metrics.mounts` when the collector is enabled. `identity.server.ip` is optional and publishes as an empty string if omitted. Enabling neither `logTailer` nor `metrics` is also an error — there would be nothing to do.
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr`, `identity.system.id`, `identity.system.name` and `identity.server.name` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, and `metrics.channel`, a positive `metrics.interval` and a non-empty `metrics.mounts` when the collector is enabled. `identity.server.ip` is optional and publishes as an empty string if omitted. Enabling nothing at all — no `logTailer`, no `metrics`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+
+The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
 Copy the sample config and fill in your values:
 
@@ -117,6 +173,9 @@ cp config/config.example.yaml config/config.yaml
 | `metrics.channel` | Redis Pub/Sub channel for metrics events |
 | `metrics.interval` | Collection interval, as a Go duration string (e.g. `"1m"`, `"30s"`) |
 | `metrics.mounts` | List of mount paths to report disk usage for |
+| `heartbeat.enabled` | Enable or disable the heartbeat (default `true` when the key or the whole block is omitted) |
+| `heartbeat.channel` | Channel beats are published to (default `"agent-heartbeat"`; an empty value falls back to it). Must match what the consumer subscribes to |
+| `heartbeat.interval` | Beat interval, as a Go duration string (default `"10s"`; must stay well under the consumer's TTL) |
 
 ## Build
 

@@ -29,5 +29,11 @@
     "channel": "your-metrics-channel",
     "interval": "1m",
     "mounts": ["/", "/var/log"]
+  },
+
+  "heartbeat": {
+    "enabled": true,
+    "channel": "agent-heartbeat",
+    "interval": "10s"
   }
 }

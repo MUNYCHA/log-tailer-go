@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/heartbeat"
 	"log-tailer-go/metrics"
 	"log-tailer-go/redis"
 	"log-tailer-go/tailer"
@@ -34,8 +35,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !cfg.LogTailer.Enabled && !cfg.Metrics.Enabled {
-		slog.Error("Neither logTailer nor metrics is enabled in config, nothing to do")
+	if !cfg.LogTailer.Enabled && !cfg.Metrics.Enabled && !cfg.Heartbeat.IsEnabled() {
+		slog.Error("No component is enabled in config, nothing to do")
 		os.Exit(1)
 	}
 
@@ -44,6 +45,15 @@ func main() {
 		metricsInterval, err = time.ParseDuration(cfg.Metrics.Interval)
 		if err != nil {
 			slog.Error("Failed to parse metrics.interval", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	var heartbeatInterval time.Duration
+	if cfg.Heartbeat.IsEnabled() {
+		heartbeatInterval, err = time.ParseDuration(cfg.Heartbeat.Interval)
+		if err != nil {
+			slog.Error("Failed to parse heartbeat.interval", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -73,6 +83,14 @@ func main() {
 	if cfg.Metrics.Enabled {
 		runSupervised(ctx, &wg, "metrics", func(ctx context.Context) {
 			metrics.New(cfg.Metrics.Mounts, cfg.Metrics.Channel, cfg.Identity, metricsInterval, publisher).Run(ctx)
+		})
+	}
+
+	// Supervised separately from metrics on purpose: a collector wedged on a
+	// stuck mount must not be able to stop the beat
+	if cfg.Heartbeat.IsEnabled() {
+		runSupervised(ctx, &wg, "heartbeat", func(ctx context.Context) {
+			heartbeat.New(cfg.Identity, cfg.Heartbeat.Channel, heartbeatInterval, publisher).Run(ctx)
 		})
 	}
 
