@@ -38,6 +38,12 @@ type MetricsEvent struct {
 	// when there is no previous /proc/stat sample to difference against.
 	CPUPercent *float64 `json:"cpuPercent,omitempty"`
 
+	// Mean download (rx) and upload (tx) rate since the previous tick, summed
+	// over physical interfaces from /proc/net/dev. Omitted as a pair, and on
+	// the first tick for the same reason as CPUPercent.
+	NetRxBytesPerSec *float64 `json:"netRxBytesPerSec,omitempty"`
+	NetTxBytesPerSec *float64 `json:"netTxBytesPerSec,omitempty"`
+
 	Mounts []MountUsage `json:"mounts"`
 }
 

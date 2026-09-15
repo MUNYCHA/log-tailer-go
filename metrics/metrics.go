@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -19,6 +20,8 @@ const (
 	loadavgPath = "/proc/loadavg"
 	meminfoPath = "/proc/meminfo"
 	statPath    = "/proc/stat"
+	netDevPath  = "/proc/net/dev"
+	sysNetPath  = "/sys/class/net"
 )
 
 // Publisher ships a batch of serialized events to a pub/sub channel in one
@@ -38,6 +41,11 @@ type Collector struct {
 	// cpuPercent. Nil until the first tick has been taken. Only ever touched
 	// from Run's goroutine, so it needs no lock.
 	prevCPU *cpuSample
+
+	// Previous /proc/net/dev reading (physical interfaces only) and when it
+	// was taken, for netRx/TxBytesPerSec. Same lifecycle as prevCPU.
+	prevNet   map[string]netCounters
+	prevNetAt time.Time
 }
 
 func New(mounts []string, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
@@ -86,6 +94,7 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	c.addLoadAvg(&event)
 	c.addMemInfo(&event)
 	c.addCPUPercent(&event)
+	c.addNetIO(&event)
 
 	mounts := make([]model.MountUsage, len(c.mounts))
 	for i, path := range c.mounts {
@@ -158,6 +167,48 @@ func (c *Collector) addCPUPercent(event *model.MetricsEvent) {
 	if pct, ok := cpuPercent(*prev, now); ok {
 		event.CPUPercent = ptr(pct)
 	}
+}
+
+// addNetIO differences this tick's /proc/net/dev against the previous one to
+// get download (rx) and upload (tx) bytes per second. Like addCPUPercent, the
+// first tick has no baseline and omits both fields.
+func (c *Collector) addNetIO(event *model.MetricsEvent) {
+	data, err := os.ReadFile(netDevPath)
+	if err != nil {
+		slog.Warn("Failed to read network stats, omitting from this tick", "path", netDevPath, "error", err)
+		return
+	}
+
+	now, err := parseNetDev(data)
+	if err != nil {
+		slog.Warn("Failed to parse network stats, omitting from this tick", "path", netDevPath, "error", err)
+		return
+	}
+	takenAt := time.Now()
+
+	for iface := range now {
+		if !isPhysicalInterface(iface) {
+			delete(now, iface)
+		}
+	}
+
+	prev, prevAt := c.prevNet, c.prevNetAt
+	c.prevNet, c.prevNetAt = now, takenAt
+	if prev == nil {
+		return
+	}
+	if rx, tx, ok := netRates(prev, now, takenAt.Sub(prevAt)); ok {
+		event.NetRxBytesPerSec = ptr(rx)
+		event.NetTxBytesPerSec = ptr(tx)
+	}
+}
+
+// isPhysicalInterface reports whether an interface is backed by a device.
+// Loopback, bridges, veths and tunnels have no device link, and counting them
+// would double count traffic that also crosses the NIC (docker0 plus eth0).
+func isPhysicalInterface(iface string) bool {
+	_, err := os.Stat(filepath.Join(sysNetPath, iface, "device"))
+	return err == nil
 }
 
 func ptr[T any](v T) *T {

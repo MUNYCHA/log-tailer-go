@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Parsers for the /proc files sampled each tick. Each takes raw bytes so it
@@ -145,4 +146,76 @@ func cpuPercent(prev, now cpuSample) (float64, bool) {
 	}
 
 	return 100 * float64(totalDelta-idleDelta) / float64(totalDelta), true
+}
+
+// netCounters is one interface's cumulative byte counters.
+type netCounters struct {
+	rxBytes uint64
+	txBytes uint64
+}
+
+// parseNetDev reads per-interface byte counters from /proc/net/dev. Past the
+// two header lines each row is "iface: <8 receive columns> <8 transmit
+// columns>", with bytes first in each group, so rx is column 0 and tx column 8.
+func parseNetDev(data []byte) (map[string]netCounters, error) {
+	counters := make(map[string]netCounters)
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		// Header lines have no colon; a busy counter can abut it ("eth0:1234")
+		name, rest, found := bytes.Cut(line, []byte(":"))
+		if !found {
+			continue
+		}
+		iface := string(bytes.TrimSpace(name))
+
+		fields := bytes.Fields(rest)
+		if len(fields) < 16 {
+			return nil, fmt.Errorf("%s: expected 16 fields, got %d", iface, len(fields))
+		}
+		rx, err := strconv.ParseUint(string(fields[0]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", iface, err)
+		}
+		tx, err := strconv.ParseUint(string(fields[8]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", iface, err)
+		}
+		counters[iface] = netCounters{rxBytes: rx, txBytes: tx}
+	}
+	if len(counters) == 0 {
+		return nil, os.ErrInvalid
+	}
+	return counters, nil
+}
+
+// netRates is the mean receive and transmit rate in bytes per second across
+// the window between two samples, summed over interfaces present in both — one
+// that appeared mid-window has no baseline and is left out. It reports false
+// when the window is unusable — no elapsed time, no interface common to both,
+// or a counter that moved backwards (a driver reload) — so the caller omits
+// the fields instead of publishing a number it cannot stand behind.
+func netRates(prev, now map[string]netCounters, elapsed time.Duration) (rx, tx float64, ok bool) {
+	if elapsed <= 0 {
+		return 0, 0, false
+	}
+
+	var rxDelta, txDelta uint64
+	shared := 0
+	for iface, cur := range now {
+		old, seen := prev[iface]
+		if !seen {
+			continue
+		}
+		if cur.rxBytes < old.rxBytes || cur.txBytes < old.txBytes {
+			return 0, 0, false
+		}
+		rxDelta += cur.rxBytes - old.rxBytes
+		txDelta += cur.txBytes - old.txBytes
+		shared++
+	}
+	if shared == 0 {
+		return 0, 0, false
+	}
+
+	secs := elapsed.Seconds()
+	return float64(rxDelta) / secs, float64(txDelta) / secs, true
 }
