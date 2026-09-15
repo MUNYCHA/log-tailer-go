@@ -15,6 +15,42 @@ func TestParse_SumsAggregateLineAndCountsIowaitAsIdle(t *testing.T) {
 	}
 }
 
+func TestParse_ExcludesGuestColumnsFromTotal(t *testing.T) {
+	// guest (100) and guest_nice (50) are already inside user and nice, so
+	// counting them again would inflate total on a VM host
+	got, err := Parse([]byte("cpu  400 60 100 1000 40 0 0 0 100 50\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Total != 1600 {
+		t.Fatalf("expected total 1600 (guest columns excluded), got %d", got.Total)
+	}
+	if got.Idle != 1040 {
+		t.Fatalf("expected idle 1040, got %d", got.Idle)
+	}
+}
+
+func TestPercent_GuestTimeIsNotCountedTwice(t *testing.T) {
+	// 100 real jiffies: user 60 (40 of it guest), system 10, idle 30 -> 70%
+	// busy. Counting the guest column again would report 110/140 = ~78.6%.
+	prev, err := Parse([]byte("cpu  0 0 0 0 0 0 0 0 0 0\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	now, err := Parse([]byte("cpu  60 0 10 30 0 0 0 0 40 0\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pct, ok := Percent(prev, now)
+	if !ok {
+		t.Fatal("expected a usable window")
+	}
+	if pct != 70 {
+		t.Fatalf("expected 70%%, got %f", pct)
+	}
+}
+
 func TestParse_NoCPULine(t *testing.T) {
 	if _, err := Parse([]byte("intr 12345\nctxt 678\n")); err == nil {
 		t.Fatal("expected error when no aggregate cpu line is present, got nil")
