@@ -3,59 +3,14 @@ package metrics
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/metrics/network"
 	"log-tailer-go/model"
 )
-
-func TestParseUptimeLine(t *testing.T) {
-	got, err := parseUptimeLine([]byte("12345.67 54321.00\n"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != 12345 {
-		t.Fatalf("expected 12345, got %d", got)
-	}
-}
-
-func TestParseUptimeLine_Empty(t *testing.T) {
-	if _, err := parseUptimeLine([]byte("")); err == nil {
-		t.Fatal("expected error for empty input, got nil")
-	}
-}
-
-func TestParseUptimeLine_NotANumber(t *testing.T) {
-	if _, err := parseUptimeLine([]byte("not-a-number 0\n")); err == nil {
-		t.Fatal("expected error for non-numeric input, got nil")
-	}
-}
-
-func TestStatMount_RootFilesystem(t *testing.T) {
-	usage := statMount("/")
-	if usage.Error != "" {
-		t.Fatalf("unexpected error statting /: %s", usage.Error)
-	}
-	if usage.TotalBytes == 0 {
-		t.Fatal("expected TotalBytes > 0 for /")
-	}
-	if usage.UsedPercent < 0 || usage.UsedPercent > 100 {
-		t.Fatalf("expected UsedPercent in [0,100], got %f", usage.UsedPercent)
-	}
-}
-
-func TestStatMount_BadPath(t *testing.T) {
-	usage := statMount("/this/path/does/not/exist/hopefully")
-	if usage.Error == "" {
-		t.Fatal("expected Error to be set for a nonexistent mount path")
-	}
-	if usage.TotalBytes != 0 {
-		t.Fatalf("expected zero TotalBytes on error, got %d", usage.TotalBytes)
-	}
-}
 
 // fakePublisher records published payloads. No Redis involved.
 type fakePublisher struct {
@@ -114,14 +69,20 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	if ev.ServerIP != "10.0.0.5" {
 		t.Fatalf("expected serverIp '10.0.0.5', got %q", ev.ServerIP)
 	}
+	if ev.UptimeSeconds <= 0 {
+		t.Fatalf("expected a positive uptimeSeconds, got %d", ev.UptimeSeconds)
+	}
 	if len(ev.Mounts) != 2 {
 		t.Fatalf("expected 2 mounts in event, got %d", len(ev.Mounts))
 	}
-	if ev.Mounts[0].Error != "" {
-		t.Fatalf("expected / to have no error, got %q", ev.Mounts[0].Error)
+	if ev.Mounts[0].Error != "" || ev.Mounts[0].TotalBytes == 0 {
+		t.Fatalf("expected / to have a reading and no error, got %+v", ev.Mounts[0])
 	}
 	if ev.Mounts[1].Error == "" {
 		t.Fatal("expected the bad mount path to have an error set")
+	}
+	if ev.Mounts[1].TotalBytes != 0 {
+		t.Fatalf("expected zero TotalBytes on error, got %d", ev.Mounts[1].TotalBytes)
 	}
 }
 
@@ -150,11 +111,10 @@ func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
 
 func TestCollector_OmitsNetIOOnFirstTickOnly(t *testing.T) {
 	hasPhysical := false
-	if data, err := os.ReadFile(netDevPath); err == nil {
-		if ifaces, err := parseNetDev(data); err == nil {
-			for iface := range ifaces {
-				hasPhysical = hasPhysical || isPhysicalInterface(iface)
-			}
+	if data, err := network.Read(); err == nil {
+		if sample, err := network.Parse(data); err == nil {
+			network.KeepPhysical(sample)
+			hasPhysical = len(sample) > 0
 		}
 	}
 	if !hasPhysical {
