@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -144,6 +145,41 @@ func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
 	}
 	if pct := *events[1].CPUPercent; pct < 0 || pct > 100 {
 		t.Fatalf("expected cpuPercent in [0,100], got %f", pct)
+	}
+}
+
+func TestCollector_OmitsNetIOOnFirstTickOnly(t *testing.T) {
+	hasPhysical := false
+	if data, err := os.ReadFile(netDevPath); err == nil {
+		if ifaces, err := parseNetDev(data); err == nil {
+			for iface := range ifaces {
+				hasPhysical = hasPhysical || isPhysicalInterface(iface)
+			}
+		}
+	}
+	if !hasPhysical {
+		t.Skip("no physical network interface on this host")
+	}
+
+	pub := &fakePublisher{}
+	c := New([]string{"/"}, "metrics-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events()
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events to compare, got %d", len(events))
+	}
+	if events[0].NetRxBytesPerSec != nil || events[0].NetTxBytesPerSec != nil {
+		t.Fatal("expected network rates omitted on the first tick")
+	}
+	if events[1].NetRxBytesPerSec == nil || events[1].NetTxBytesPerSec == nil {
+		t.Fatal("expected network rates on the second tick, got nil")
+	}
+	if *events[1].NetRxBytesPerSec < 0 || *events[1].NetTxBytesPerSec < 0 {
+		t.Fatalf("expected non-negative rates, got rx %f tx %f", *events[1].NetRxBytesPerSec, *events[1].NetTxBytesPerSec)
 	}
 }
 

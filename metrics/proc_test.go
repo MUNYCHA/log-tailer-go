@@ -1,6 +1,9 @@
 package metrics
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseLoadavg(t *testing.T) {
 	got, err := parseLoadavg([]byte("0.02 0.04 0.05 1/791 12163\n"))
@@ -121,5 +124,82 @@ func TestCPUPercent_CountersWentBackwards(t *testing.T) {
 func TestCPUPercent_IdleGrewFasterThanTotal(t *testing.T) {
 	if _, ok := cpuPercent(cpuSample{total: 1000, idle: 800}, cpuSample{total: 1010, idle: 900}); ok {
 		t.Fatal("expected an unusable window when idle outpaces total")
+	}
+}
+
+const sampleNetDev = `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 35172512   11167    0    0    0     0          0         0 35172512   11167    0    0    0     0       0          0
+  eth0:198034192  136510    0    0    0     0          0       190  1915978   13630    0    0    0     0       0          0
+`
+
+func TestParseNetDev(t *testing.T) {
+	got, err := parseNetDev([]byte(sampleNetDev))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 interfaces, got %d", len(got))
+	}
+	// Counter abutting the colon must still parse
+	if eth := got["eth0"]; eth.rxBytes != 198034192 || eth.txBytes != 1915978 {
+		t.Fatalf("expected eth0 rx 198034192 / tx 1915978, got %+v", eth)
+	}
+	if lo := got["lo"]; lo.rxBytes != 35172512 || lo.txBytes != 35172512 {
+		t.Fatalf("expected lo rx/tx 35172512, got %+v", lo)
+	}
+}
+
+func TestParseNetDev_TruncatedRow(t *testing.T) {
+	if _, err := parseNetDev([]byte("  eth0: 100 1 0 0\n")); err == nil {
+		t.Fatal("expected error for a truncated interface row, got nil")
+	}
+}
+
+func TestParseNetDev_NoInterfaces(t *testing.T) {
+	if _, err := parseNetDev([]byte("Inter-|   Receive\n face |bytes\n")); err == nil {
+		t.Fatal("expected error when no interface rows are present, got nil")
+	}
+}
+
+func TestNetRates(t *testing.T) {
+	prev := map[string]netCounters{"eth0": {rxBytes: 1000, txBytes: 500}, "eth1": {rxBytes: 0, txBytes: 0}}
+	now := map[string]netCounters{"eth0": {rxBytes: 3000, txBytes: 1500}, "eth1": {rxBytes: 2000, txBytes: 1000}}
+
+	// (2000+2000)/2s rx, (1000+1000)/2s tx
+	rx, tx, ok := netRates(prev, now, 2*time.Second)
+	if !ok {
+		t.Fatal("expected a usable window")
+	}
+	if rx != 2000 || tx != 1000 {
+		t.Fatalf("expected rx 2000 / tx 1000 bytes/s, got %f / %f", rx, tx)
+	}
+}
+
+func TestNetRates_IgnoresInterfaceWithNoBaseline(t *testing.T) {
+	prev := map[string]netCounters{"eth0": {rxBytes: 1000, txBytes: 1000}}
+	now := map[string]netCounters{"eth0": {rxBytes: 2000, txBytes: 2000}, "eth1": {rxBytes: 9e9, txBytes: 9e9}}
+
+	rx, tx, ok := netRates(prev, now, time.Second)
+	if !ok || rx != 1000 || tx != 1000 {
+		t.Fatalf("expected eth1's lifetime counters left out, got rx %f tx %f ok=%v", rx, tx, ok)
+	}
+}
+
+func TestNetRates_CounterWentBackwards(t *testing.T) {
+	prev := map[string]netCounters{"eth0": {rxBytes: 5000, txBytes: 5000}}
+	now := map[string]netCounters{"eth0": {rxBytes: 100, txBytes: 6000}}
+	if _, _, ok := netRates(prev, now, time.Second); ok {
+		t.Fatal("expected an unusable window after a counter reset")
+	}
+}
+
+func TestNetRates_NoSharedInterfaceOrElapsedTime(t *testing.T) {
+	prev := map[string]netCounters{"eth0": {rxBytes: 1, txBytes: 1}}
+	if _, _, ok := netRates(prev, map[string]netCounters{"eth1": {rxBytes: 2, txBytes: 2}}, time.Second); ok {
+		t.Fatal("expected an unusable window with no interface in both samples")
+	}
+	if _, _, ok := netRates(prev, prev, 0); ok {
+		t.Fatal("expected an unusable window with no elapsed time")
 	}
 }
