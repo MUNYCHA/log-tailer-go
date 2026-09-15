@@ -16,7 +16,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Warns (throttled) when a channel has zero subscribers, so a down consumer is visible in the journal
 - Structured logging via `log/slog`
 - Config file may be JSON or YAML, auto-detected by extension
-- Optional metrics collector publishes mount disk usage, server uptime, load average, memory/swap and CPU utilisation as a combined JSON event on a timer, independent of log tailing
+- Optional metrics collector publishes mount disk usage, server uptime, load average, memory/swap, CPU utilisation and network throughput as a combined JSON event on a timer, independent of log tailing
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collector, so a wedged metrics read can't make a healthy server look down
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
@@ -39,8 +39,8 @@ log-tailer-go/
 │   ├── tailer.go        — core file tailing logic
 │   └── tailer_test.go
 ├── metrics/
-│   ├── metrics.go       — uptime, load, memory, CPU and mount usage collector
-│   ├── proc.go          — /proc/loadavg, /proc/meminfo and /proc/stat parsers
+│   ├── metrics.go       — uptime, load, memory, CPU, network and mount usage collector
+│   ├── proc.go          — /proc/loadavg, /proc/meminfo, /proc/stat and /proc/net/dev parsers
 │   ├── proc_test.go
 │   └── metrics_test.go
 ├── heartbeat/
@@ -75,7 +75,7 @@ Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all 
 
 ### Metrics
 
-When `metrics.enabled` is `true`, a combined snapshot of server uptime, load average, memory and swap, CPU utilisation, and disk usage for the configured mounts is published to `metrics.channel` every `metrics.interval`:
+When `metrics.enabled` is `true`, a combined snapshot of server uptime, load average, memory and swap, CPU utilisation, network throughput, and disk usage for the configured mounts is published to `metrics.channel` every `metrics.interval`:
 
 ```json
 {
@@ -93,6 +93,8 @@ When `metrics.enabled` is `true`, a combined snapshot of server uptime, load ave
   "swapTotalBytes": 4294967296,
   "swapUsedBytes": 102400000,
   "cpuPercent": 12.7,
+  "netRxBytesPerSec": 184320.5,
+  "netTxBytesPerSec": 52480.25,
   "mounts": [
     { "path": "/", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151234567890, "usedPercent": 24.4 },
     { "path": "/var/log", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9448931328, "usedPercent": 10.0 }
@@ -110,6 +112,7 @@ Every `/proc`-sourced field is **omitted from the JSON when it can't be read**, 
 | `/proc/loadavg` | `load1`, `load5`, `load15` | All three omitted, the tick still publishes |
 | `/proc/meminfo` | `memTotalBytes`, `memAvailableBytes`, `swapTotalBytes`, `swapUsedBytes` | All four omitted, the tick still publishes |
 | `/proc/stat` | `cpuPercent` | Omitted, the tick still publishes |
+| `/proc/net/dev` | `netRxBytesPerSec`, `netTxBytesPerSec` | Both omitted, the tick still publishes |
 
 `uptimeSeconds` is the exception because the consumer discards any message missing it — publishing that tick would only waste a round trip.
 
@@ -125,6 +128,10 @@ pct  = 100 * busy / (total_now - total_prev)
 `idle` counts both the `idle` and `iowait` columns, matching `top`: a server blocked on a dead NFS mount is waiting, not burning CPU, and reporting it as busy would send someone hunting the wrong problem. Load average is what surfaces that case, which is why `load1/5/15` are published alongside — the two numbers disagreeing is the signal.
 
 Because it needs two samples, `cpuPercent` is **omitted on the first tick after startup**, and again on the first tick after a supervised restart (the collector is rebuilt, so the previous sample is gone). It's also omitted if the counters move backwards, which is what a reboot between ticks looks like. A short spike inside a 1-minute interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
+
+`netRxBytesPerSec` (download) and `netTxBytesPerSec` (upload) are the **mean rate in bytes per second over the interval**, differencing two `/proc/net/dev` samples and dividing by the wall-clock time between them. Multiply by 8 for bits per second. They are summed over **physical interfaces only** — those with a `/sys/class/net/<iface>/device` link — so loopback, Docker bridges, veths and tunnels are excluded; counting them would double count traffic that also crosses the NIC. An interface that appears between two ticks is left out of that window, since it has no baseline.
+
+Both follow the same omission rules as `cpuPercent`: absent on the first tick after startup or a supervised restart, and absent when any counter moves backwards (a driver reload). A host with no physical interface — e.g. the agent running inside a container — never reports them.
 
 ### Heartbeat
 
