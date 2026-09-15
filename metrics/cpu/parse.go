@@ -16,6 +16,11 @@ type Sample struct {
 // Parse sums the aggregate "cpu" line of /proc/stat. Idle counts both the
 // idle and iowait columns: a server blocked on a dead mount is waiting, not
 // burning CPU, and load average is what surfaces that instead.
+//
+// The guest and guest_nice columns are left out of Total: the kernel already
+// counts guest time inside user and nice, so adding them again would inflate
+// Total and busy time by the same amount, overstating cpuPercent on a host
+// running VMs.
 func Parse(data []byte) (Sample, error) {
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		fields := bytes.Fields(line)
@@ -29,8 +34,12 @@ func Parse(data []byte) (Sample, error) {
 			if err != nil {
 				return Sample{}, err
 			}
+			// Columns are user, nice, system, idle, iowait, irq, softirq,
+			// steal, guest, guest_nice
+			if i == 8 || i == 9 {
+				continue
+			}
 			s.Total += v
-			// Columns are user, nice, system, idle, iowait, irq, ...
 			if i == 3 || i == 4 {
 				s.Idle += v
 			}
