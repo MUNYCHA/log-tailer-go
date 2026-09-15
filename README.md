@@ -20,6 +20,17 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collector, so a wedged metrics read can't make a healthy server look down
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
+## Requirements
+
+- **Linux only** — metrics are read from `/proc`, `/sys` and `statfs`; the agent does not build on Windows, macOS or BSD
+- **Kernel 3.14 or newer** for a complete metrics report
+  - 3.2 – 3.13: runs, but the memory fields are omitted (`MemAvailable` was added to `/proc/meminfo` in 3.14)
+  - RHEL/CentOS 7 (3.10) backports `MemAvailable`, so memory is reported there too
+  - Below 3.2: not supported by the Go runtime
+- **Tested on kernel 6.6.** Older kernels are covered by the documented, append-only `/proc` formats, not by direct testing
+- **Go 1.25+** to build (`go.mod`); the resulting binary has no runtime dependencies
+- **Redis** reachable from the server (Pub/Sub only, no persistence needed)
+
 ## Project Structure
 
 ```
