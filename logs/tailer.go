@@ -1,4 +1,4 @@
-package tailer
+package logs
 
 import (
 	"bytes"

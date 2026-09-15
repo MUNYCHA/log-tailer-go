@@ -11,9 +11,9 @@ import (
 
 	"log-tailer-go/config"
 	"log-tailer-go/heartbeat"
+	"log-tailer-go/logs"
 	"log-tailer-go/metrics"
 	"log-tailer-go/redis"
-	"log-tailer-go/tailer"
 )
 
 const (
@@ -75,7 +75,7 @@ func main() {
 	if cfg.LogTailer.Enabled {
 		for _, f := range cfg.LogTailer.Files {
 			runSupervised(ctx, &wg, "tailer:"+f.Path, func(ctx context.Context) {
-				tailer.New(f.Path, f.Channel, cfg.Identity, publisher).Run(ctx)
+				logs.New(f.Path, f.Channel, cfg.Identity, publisher).Run(ctx)
 			})
 		}
 	}

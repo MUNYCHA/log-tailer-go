@@ -1,4 +1,4 @@
-package tailer_test
+package logs_test
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/logs"
 	"log-tailer-go/model"
-	"log-tailer-go/tailer"
 )
 
 // testIdentity is the identity every tailer under test publishes with.
@@ -92,7 +92,7 @@ func startTailer(t *testing.T, path string, pub *fakePublisher) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tailer.New(path, "test-channel", testIdentity, pub).Run(ctx)
+		logs.New(path, "test-channel", testIdentity, pub).Run(ctx)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -444,7 +444,7 @@ func TestShutdownStopsPromptly(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tailer.New(path, "test-channel", testIdentity, pub).Run(ctx)
+		logs.New(path, "test-channel", testIdentity, pub).Run(ctx)
 	}()
 	waitForOpen()
 

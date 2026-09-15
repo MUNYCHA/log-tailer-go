@@ -35,20 +35,36 @@ log-tailer-go/
 │   └── event.go         — LogEvent, MetricsEvent and HeartbeatEvent JSON structures
 ├── redis/
 │   └── publisher.go     — Redis Pub/Sub publisher
-├── tailer/
-│   ├── tailer.go        — core file tailing logic
+├── logs/
+│   ├── tailer.go        — follows one log file, handles rotation/truncation, publishes each line
 │   └── tailer_test.go
 ├── metrics/
-│   ├── metrics.go       — uptime, load, memory, CPU, network and mount usage collector
-│   ├── proc.go          — /proc/loadavg, /proc/meminfo, /proc/stat and /proc/net/dev parsers
-│   ├── proc_test.go
-│   └── metrics_test.go
+│   ├── collector.go     — every interval: runs read → parse → calculate for each metric
+│   │                      below, builds one event, publishes it
+│   ├── collector_test.go
+│   ├── uptime/          — /proc/uptime → uptimeSeconds
+│   ├── load/            — /proc/loadavg → load1/5/15
+│   ├── memory/          — /proc/meminfo → RAM and swap in bytes
+│   ├── cpu/             — /proc/stat, last tick vs this tick → cpuPercent
+│   ├── network/         — /proc/net/dev, physical NICs only, last tick vs this tick → rx/tx bytes/sec
+│   └── disk/            — statfs on each mount → total/used/free bytes, used %
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
 └── deploy/
     └── log-tailer-go.service — systemd unit for production
 ```
+
+Every metric folder under `metrics/` has the same four files, one job each:
+
+| File | Job | Touches the server? |
+|---|---|---|
+| `read.go` | Gets raw data from Linux (`/proc`, `/sys`, `statfs`) | Yes — the only file that does |
+| `parse.go` | Turns the raw data into plain numbers | No |
+| `calculate.go` | Turns those numbers into the published values (bytes, %, rates) | No |
+| `<name>_test.go` | Tests parsing and calculation with fake input | No |
+
+`collector.go` never reads the server or does arithmetic itself — it calls those three steps for each metric in turn. Adding a metric means adding a folder with the same shape and one call in `collector.go`.
 
 ## Message Format
 
