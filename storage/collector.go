@@ -95,10 +95,11 @@ func mountUsage(path string) model.MountUsage {
 
 	usage := disk.ToBytes(disk.Parse(stat))
 	return model.MountUsage{
-		Path:        path,
-		TotalBytes:  usage.TotalBytes,
-		UsedBytes:   usage.UsedBytes,
-		FreeBytes:   usage.FreeBytes,
-		UsedPercent: usage.UsedPercent,
+		Path:          path,
+		TotalBytes:    usage.TotalBytes,
+		UsedBytes:     usage.UsedBytes,
+		FreeBytes:     usage.FreeBytes,
+		ReservedBytes: usage.ReservedBytes,
+		UsedPercent:   usage.UsedPercent,
 	}
 }

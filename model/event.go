@@ -86,12 +86,13 @@ type StorageEvent struct {
 }
 
 type MountUsage struct {
-	Path        string  `json:"path"`
-	TotalBytes  uint64  `json:"totalBytes"`
-	UsedBytes   uint64  `json:"usedBytes"`
-	FreeBytes   uint64  `json:"freeBytes"`
-	UsedPercent float64 `json:"usedPercent"`
-	Error       string  `json:"error,omitempty"`
+	Path          string  `json:"path"`
+	TotalBytes    uint64  `json:"totalBytes"`
+	UsedBytes     uint64  `json:"usedBytes"`
+	FreeBytes     uint64  `json:"freeBytes"`
+	ReservedBytes uint64  `json:"reservedBytes"`
+	UsedPercent   float64 `json:"usedPercent"`
+	Error         string  `json:"error,omitempty"`
 }
 
 // HeartbeatEvent is the entire heartbeat payload: the same identity pair the

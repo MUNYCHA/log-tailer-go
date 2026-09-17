@@ -63,7 +63,7 @@ log-tailer-go/
 │   ├── collector.go     — every interval: runs read → parse → calculate for each mount,
 │   │                      builds one storage event, publishes it
 │   ├── collector_test.go
-│   └── disk/            — statfs on each mount → total/used/free bytes, used %
+│   └── disk/            — statfs on each mount → total/used/free/reserved bytes, used %
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
@@ -201,11 +201,23 @@ When `storage.enabled` is `true`, disk usage for each path in `storage.mounts` i
   "serverIp": "10.0.0.5",
   "timestamp": "2026-05-28T10:00:00Z",
   "mounts": [
-    { "path": "/", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151234567890, "usedPercent": 24.4 },
-    { "path": "/var/log", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9448931328, "usedPercent": 10.0 }
+    { "path": "/", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151582326374, "reservedBytes": 10737238426, "usedPercent": 25.7 },
+    { "path": "/var/log", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9126805504, "reservedBytes": 536870912, "usedPercent": 10.53 }
   ]
 }
 ```
+
+Values come from `statfs` and match `df -B1` column for column:
+
+| Field | Calculation | `df` column |
+|---|---|---|
+| `totalBytes` | `f_blocks × f_frsize` | 1B-blocks |
+| `usedBytes` | `(f_blocks − f_bfree) × f_frsize` | Used |
+| `freeBytes` | `f_bavail × f_frsize` — what a non-root app can still write | Available |
+| `reservedBytes` | `(f_bfree − f_bavail) × f_frsize` — writable by root only (ext4 keeps 5% by default) | not shown |
+| `usedPercent` | `used / (used + free) × 100` | Use% (df rounds up) |
+
+`used + free + reserved = total`. `usedPercent` uses df's formula, so `100` means apps can no longer write even though root-reserved space is left. Sizes use `f_frsize`, the unit the block counts are in; `f_bsize` is only an I/O hint. Every subtraction is guarded, so a filesystem reporting inconsistent counts gets `0` rather than an underflowed number.
 
 Mounts are reported in config order. A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. `storage.mounts` may be empty, in which case `mounts` is published as `[]`.
 

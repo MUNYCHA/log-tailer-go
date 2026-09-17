@@ -1,6 +1,9 @@
 package disk
 
-import "testing"
+import (
+	"syscall"
+	"testing"
+)
 
 func TestReadAndToBytes_RootFilesystem(t *testing.T) {
 	stat, err := Read("/")
@@ -14,11 +17,27 @@ func TestReadAndToBytes_RootFilesystem(t *testing.T) {
 	if usage.UsedPercent < 0 || usage.UsedPercent > 100 {
 		t.Fatalf("expected UsedPercent in [0,100], got %f", usage.UsedPercent)
 	}
+	if usage.UsedBytes+usage.FreeBytes+usage.ReservedBytes != usage.TotalBytes {
+		t.Fatalf("expected used + free + reserved = total, got %+v", usage)
+	}
 }
 
 func TestRead_BadPath(t *testing.T) {
 	if _, err := Read("/this/path/does/not/exist/hopefully"); err == nil {
 		t.Fatal("expected error for a nonexistent mount path")
+	}
+}
+
+// Guards the choice of f_frsize: the block counts are in f_frsize units, and
+// f_bsize is only an I/O hint that can differ from it
+func TestParse_UsesFrsizeNotBsize(t *testing.T) {
+	got := Parse(syscall.Statfs_t{Blocks: 1000, Bfree: 400, Bavail: 300, Bsize: 1048576, Frsize: 4096})
+	if got.BlockSize != 4096 {
+		t.Fatalf("expected block size from Frsize (4096), got %d", got.BlockSize)
+	}
+	want := Sample{Blocks: 1000, FreeBlocks: 400, AvailableBlocks: 300, BlockSize: 4096}
+	if got != want {
+		t.Fatalf("expected %+v, got %+v", want, got)
 	}
 }
 
@@ -34,13 +53,49 @@ func TestToBytes(t *testing.T) {
 	if got.FreeBytes != 300*4096 {
 		t.Fatalf("expected free = non-root available blocks (%d), got %d", 300*4096, got.FreeBytes)
 	}
-	if got.UsedPercent != 60 {
-		t.Fatalf("expected 60%%, got %f", got.UsedPercent)
+	if got.ReservedBytes != 100*4096 {
+		t.Fatalf("expected reserved = free - available blocks (%d), got %d", 100*4096, got.ReservedBytes)
+	}
+	if got.UsedBytes+got.FreeBytes+got.ReservedBytes != got.TotalBytes {
+		t.Fatal("expected used + free + reserved = total")
+	}
+	// df formula: 600 / (600 + 300) = 66.67%, not 600 / 1000 = 60%
+	want := float64(600) / float64(900) * 100
+	if got.UsedPercent != want {
+		t.Fatalf("expected df usedPercent %f, got %f", want, got.UsedPercent)
+	}
+}
+
+func TestToBytes_FullForAppsIs100Percent(t *testing.T) {
+	// Only root-reserved blocks left: apps can't write, so df reports 100%
+	got := ToBytes(Sample{Blocks: 1000, FreeBlocks: 50, AvailableBlocks: 0, BlockSize: 4096})
+	if got.UsedPercent != 100 {
+		t.Fatalf("expected 100%% when nothing is available to apps, got %f", got.UsedPercent)
+	}
+	if got.ReservedBytes != 50*4096 {
+		t.Fatalf("expected reserved 50 blocks, got %d", got.ReservedBytes)
 	}
 }
 
 func TestToBytes_EmptyFilesystem(t *testing.T) {
 	if got := ToBytes(Sample{}); got.UsedPercent != 0 {
 		t.Fatalf("expected 0%% for a zero-size filesystem, got %f", got.UsedPercent)
+	}
+}
+
+func TestToBytes_AvailableAboveFreeDoesNotWrap(t *testing.T) {
+	got := ToBytes(Sample{Blocks: 1000, FreeBlocks: 100, AvailableBlocks: 120, BlockSize: 4096})
+	if got.ReservedBytes != 0 {
+		t.Fatalf("expected reserved clamped to 0, got %d", got.ReservedBytes)
+	}
+}
+
+func TestToBytes_FreeAboveTotalDoesNotWrap(t *testing.T) {
+	got := ToBytes(Sample{Blocks: 100, FreeBlocks: 120, AvailableBlocks: 120, BlockSize: 4096})
+	if got.UsedBytes != 0 {
+		t.Fatalf("expected used clamped to 0, got %d", got.UsedBytes)
+	}
+	if got.UsedPercent != 0 {
+		t.Fatalf("expected 0%%, got %f", got.UsedPercent)
 	}
 }
