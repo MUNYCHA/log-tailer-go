@@ -17,9 +17,9 @@ Tick a box when that item is built, tested and merged to `dev`.
 | 3 | Resources | Separate Resources event with grouped shape | [x] |
 | 4 | Resources — uptime | Optional (no longer skips the event) | [x] |
 | 5 | Resources — cpu | Add `count` | [x] |
-| 6 | Resources — memory | Add `usedBytes`, `usedPercent` | [ ] |
-| 7 | Resources — memory | Estimate when `MemAvailable` is missing + `estimated` flag | [ ] |
-| 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | [ ] |
+| 6 | Resources — memory | Add `usedBytes`, `usedPercent` | [x] |
+| 7 | Resources — memory | Estimate when `MemAvailable` is missing + `estimated` flag | [x] |
+| 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | [x] |
 | 9 | Resources — network | Move into `network` group | [x] |
 | 10 | Storage | Separate Storage event | [x] |
 | 11 | Storage — mount | Use `f_frsize` instead of `f_bsize` | [ ] |
