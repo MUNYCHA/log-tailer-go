@@ -12,8 +12,9 @@ import (
 	"log-tailer-go/config"
 	"log-tailer-go/heartbeat"
 	"log-tailer-go/logs"
-	"log-tailer-go/metrics"
 	"log-tailer-go/redis"
+	"log-tailer-go/resources"
+	"log-tailer-go/storage"
 )
 
 const (
@@ -35,16 +36,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !cfg.LogTailer.Enabled && !cfg.Metrics.Enabled && !cfg.Heartbeat.IsEnabled() {
+	if !cfg.LogTailer.Enabled && !cfg.Resources.Enabled && !cfg.Storage.Enabled && !cfg.Heartbeat.IsEnabled() {
 		slog.Error("No component is enabled in config, nothing to do")
 		os.Exit(1)
 	}
 
-	var metricsInterval time.Duration
-	if cfg.Metrics.Enabled {
-		metricsInterval, err = time.ParseDuration(cfg.Metrics.Interval)
+	var resourcesInterval time.Duration
+	if cfg.Resources.Enabled {
+		resourcesInterval, err = time.ParseDuration(cfg.Resources.Interval)
 		if err != nil {
-			slog.Error("Failed to parse metrics.interval", "error", err)
+			slog.Error("Failed to parse resources.interval", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	var storageInterval time.Duration
+	if cfg.Storage.Enabled {
+		storageInterval, err = time.ParseDuration(cfg.Storage.Interval)
+		if err != nil {
+			slog.Error("Failed to parse storage.interval", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -80,13 +90,21 @@ func main() {
 		}
 	}
 
-	if cfg.Metrics.Enabled {
-		runSupervised(ctx, &wg, "metrics", func(ctx context.Context) {
-			metrics.New(cfg.Metrics.Mounts, cfg.Metrics.Channel, cfg.Identity, metricsInterval, publisher).Run(ctx)
+	if cfg.Resources.Enabled {
+		runSupervised(ctx, &wg, "resources", func(ctx context.Context) {
+			resources.New(cfg.Resources.Channel, cfg.Identity, resourcesInterval, publisher).Run(ctx)
 		})
 	}
 
-	// Supervised separately from metrics on purpose: a collector wedged on a
+	// Supervised separately from resources on purpose: a stat stuck on a dead
+	// mount only delays the storage event, never cpu or memory
+	if cfg.Storage.Enabled {
+		runSupervised(ctx, &wg, "storage", func(ctx context.Context) {
+			storage.New(cfg.Storage.Mounts, cfg.Storage.Channel, cfg.Identity, storageInterval, publisher).Run(ctx)
+		})
+	}
+
+	// Supervised separately from storage on purpose: a collector wedged on a
 	// stuck mount must not be able to stop the beat
 	if cfg.Heartbeat.IsEnabled() {
 		runSupervised(ctx, &wg, "heartbeat", func(ctx context.Context) {

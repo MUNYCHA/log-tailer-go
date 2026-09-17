@@ -16,74 +16,101 @@ func validBase() config.AppConfig {
 	}
 }
 
-func TestValidate_MetricsDisabled_NoChecks(t *testing.T) {
+func TestValidate_ResourcesAndStorageDisabled_NoChecks(t *testing.T) {
 	cfg := validBase()
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected no error with metrics disabled, got: %v", err)
+		t.Fatalf("expected no error with resources and storage disabled, got: %v", err)
 	}
 }
 
-func TestValidate_MetricsEnabled_MissingChannel(t *testing.T) {
+// A disabled block is not validated, so stale values cannot block boot
+func TestValidate_ResourcesAndStorageDisabled_BadValuesIgnored(t *testing.T) {
 	cfg := validBase()
-	cfg.Metrics = config.MetricsConfig{
-		Enabled:  true,
-		Interval: "1m",
-		Mounts:   []string{"/"},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for missing metrics.channel, got nil")
-	}
-}
-
-func TestValidate_MetricsEnabled_BadInterval(t *testing.T) {
-	cfg := validBase()
-	cfg.Metrics = config.MetricsConfig{
-		Enabled:  true,
-		Channel:  "metrics-channel",
-		Interval: "not-a-duration",
-		Mounts:   []string{"/"},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for invalid metrics.interval, got nil")
-	}
-}
-
-func TestValidate_MetricsEnabled_ZeroInterval(t *testing.T) {
-	cfg := validBase()
-	cfg.Metrics = config.MetricsConfig{
-		Enabled:  true,
-		Channel:  "metrics-channel",
-		Interval: "0s",
-		Mounts:   []string{"/"},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for zero metrics.interval, got nil")
-	}
-}
-
-func TestValidate_MetricsEnabled_EmptyMounts(t *testing.T) {
-	cfg := validBase()
-	cfg.Metrics = config.MetricsConfig{
-		Enabled:  true,
-		Channel:  "metrics-channel",
-		Interval: "1m",
-		Mounts:   nil,
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for empty metrics.mounts, got nil")
-	}
-}
-
-func TestValidate_MetricsEnabled_Valid(t *testing.T) {
-	cfg := validBase()
-	cfg.Metrics = config.MetricsConfig{
-		Enabled:  true,
-		Channel:  "metrics-channel",
-		Interval: "1m",
-		Mounts:   []string{"/", "/var/log"},
-	}
+	cfg.Resources = config.ResourcesConfig{Interval: "not-a-duration"}
+	cfg.Storage = config.StorageConfig{Interval: "not-a-duration", Mounts: []string{""}}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected valid metrics config to pass, got: %v", err)
+		t.Fatalf("expected no error validating disabled blocks, got: %v", err)
+	}
+}
+
+func TestValidate_ResourcesEnabled_MissingChannel(t *testing.T) {
+	cfg := validBase()
+	cfg.Resources = config.ResourcesConfig{Enabled: true, Interval: "30s"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for missing resources.channel, got nil")
+	}
+}
+
+func TestValidate_ResourcesEnabled_BadInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Resources = config.ResourcesConfig{Enabled: true, Channel: "resources-channel", Interval: "not-a-duration"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid resources.interval, got nil")
+	}
+}
+
+func TestValidate_ResourcesEnabled_ZeroInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Resources = config.ResourcesConfig{Enabled: true, Channel: "resources-channel", Interval: "0s"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for zero resources.interval, got nil")
+	}
+}
+
+func TestValidate_ResourcesEnabled_Valid(t *testing.T) {
+	cfg := validBase()
+	cfg.Resources = config.ResourcesConfig{Enabled: true, Channel: "resources-channel", Interval: "30s"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid resources config to pass, got: %v", err)
+	}
+}
+
+func TestValidate_StorageEnabled_MissingChannel(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Interval: "5m", Mounts: []string{"/"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for missing storage.channel, got nil")
+	}
+}
+
+func TestValidate_StorageEnabled_BadInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Channel: "storage-channel", Interval: "not-a-duration"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid storage.interval, got nil")
+	}
+}
+
+func TestValidate_StorageEnabled_ZeroInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Channel: "storage-channel", Interval: "0s"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for zero storage.interval, got nil")
+	}
+}
+
+func TestValidate_StorageEnabled_EmptyMountEntry(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Channel: "storage-channel", Interval: "5m", Mounts: []string{"/", ""}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for an empty storage.mounts entry, got nil")
+	}
+}
+
+// The server total comes from the mount table, so no configured mounts is valid
+func TestValidate_StorageEnabled_NoMountsIsValid(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Channel: "storage-channel", Interval: "5m"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected storage without mounts to pass, got: %v", err)
+	}
+}
+
+func TestValidate_StorageEnabled_Valid(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Channel: "storage-channel", Interval: "5m", Mounts: []string{"/", "/var/log"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid storage config to pass, got: %v", err)
 	}
 }
 

@@ -24,10 +24,16 @@
     ]
   },
 
-  "metrics": {
-    "enabled": false,
-    "channel": "your-metrics-channel",
-    "interval": "1m",
+  "resources": {
+    "enabled": true,
+    "channel": "your-resources-channel",
+    "interval": "30s"
+  },
+
+  "storage": {
+    "enabled": true,
+    "channel": "your-storage-channel",
+    "interval": "5m",
     "mounts": ["/", "/var/log"]
   },
 

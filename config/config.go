@@ -9,7 +9,8 @@ type AppConfig struct {
 	Redis     RedisConfig     `json:"redis"`
 	Identity  IdentityConfig  `json:"identity"`
 	LogTailer LogTailerConfig `json:"logTailer"`
-	Metrics   MetricsConfig   `json:"metrics"`
+	Resources ResourcesConfig `json:"resources"`
+	Storage   StorageConfig   `json:"storage"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 }
 
@@ -44,10 +45,21 @@ type LogFileConfig struct {
 	Channel string `json:"channel"`
 }
 
-type MetricsConfig struct {
+// ResourcesConfig gates the resources event: uptime, cpu, memory, swap and
+// network.
+type ResourcesConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Channel  string `json:"channel"`
+	Interval string `json:"interval"` // e.g. "30s" — parsed with time.ParseDuration
+}
+
+// StorageConfig gates the storage event. Mounts lists paths to report one by
+// one and may be empty: the server total is found from the mount table, not
+// from this list.
+type StorageConfig struct {
 	Enabled  bool     `json:"enabled"`
 	Channel  string   `json:"channel"`
-	Interval string   `json:"interval"` // e.g. "1m", "30s" — parsed with time.ParseDuration
+	Interval string   `json:"interval"` // e.g. "5m" — parsed with time.ParseDuration
 	Mounts   []string `json:"mounts"`
 }
 
@@ -114,19 +126,24 @@ func (c *AppConfig) Validate() error {
 			}
 		}
 	}
-	if c.Metrics.Enabled {
-		if c.Metrics.Channel == "" {
-			return fmt.Errorf("'metrics.channel' is required")
+	if c.Resources.Enabled {
+		if c.Resources.Channel == "" {
+			return fmt.Errorf("'resources.channel' is required")
 		}
-		if d, err := time.ParseDuration(c.Metrics.Interval); err != nil || d <= 0 {
-			return fmt.Errorf("'metrics.interval' must be a positive duration (e.g. \"1m\")")
+		if d, err := time.ParseDuration(c.Resources.Interval); err != nil || d <= 0 {
+			return fmt.Errorf("'resources.interval' must be a positive duration (e.g. \"30s\")")
 		}
-		if len(c.Metrics.Mounts) == 0 {
-			return fmt.Errorf("'metrics.mounts' must not be empty when enabled")
+	}
+	if c.Storage.Enabled {
+		if c.Storage.Channel == "" {
+			return fmt.Errorf("'storage.channel' is required")
 		}
-		for _, m := range c.Metrics.Mounts {
+		if d, err := time.ParseDuration(c.Storage.Interval); err != nil || d <= 0 {
+			return fmt.Errorf("'storage.interval' must be a positive duration (e.g. \"5m\")")
+		}
+		for _, m := range c.Storage.Mounts {
 			if m == "" {
-				return fmt.Errorf("each 'metrics.mounts' entry must be non-empty")
+				return fmt.Errorf("each 'storage.mounts' entry must be non-empty")
 			}
 		}
 	}
