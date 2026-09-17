@@ -6,29 +6,41 @@ import (
 	"strconv"
 )
 
-// Sample is one reading of the aggregate "cpu" line's counters, in jiffies
-// since boot.
+// Sample is one reading of /proc/stat: the aggregate "cpu" line's counters,
+// in jiffies since boot, and how many per-CPU lines the file lists.
 type Sample struct {
 	Total uint64
 	Idle  uint64
+	CPUs  int // "cpu0" … "cpuN" lines: online logical CPUs
 }
 
-// Parse sums the aggregate "cpu" line of /proc/stat. Idle counts both the
-// idle and iowait columns: a server blocked on a dead mount is waiting, not
-// burning CPU, and load average is what surfaces that instead.
+// Parse sums the aggregate "cpu" line of /proc/stat and counts the per-CPU
+// lines. Idle counts both the idle and iowait columns: a server blocked on a
+// dead mount is waiting, not burning CPU, and load average is what surfaces
+// that instead.
 //
 // The guest and guest_nice columns are left out of Total: the kernel already
 // counts guest time inside user and nice, so adding them again would inflate
-// Total and busy time by the same amount, overstating cpuPercent on a host
-// running VMs.
+// Total and busy time by the same amount, overstating the busy percentage on a
+// host running VMs.
 func Parse(data []byte) (Sample, error) {
+	var s Sample
+	found := false
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		fields := bytes.Fields(line)
-		if len(fields) < 5 || string(fields[0]) != "cpu" {
+		if len(fields) < 5 || !bytes.HasPrefix(fields[0], []byte("cpu")) {
+			continue
+		}
+		if name := fields[0]; len(name) > 3 {
+			if name[3] >= '0' && name[3] <= '9' {
+				s.CPUs++
+			}
+			continue
+		}
+		if found {
 			continue
 		}
 
-		var s Sample
 		for i, field := range fields[1:] {
 			v, err := strconv.ParseUint(string(field), 10, 64)
 			if err != nil {
@@ -44,7 +56,10 @@ func Parse(data []byte) (Sample, error) {
 				s.Idle += v
 			}
 		}
-		return s, nil
+		found = true
 	}
-	return Sample{}, os.ErrInvalid
+	if !found {
+		return Sample{}, os.ErrInvalid
+	}
+	return s, nil
 }

@@ -70,19 +70,13 @@ func (c *Collector) Run(ctx context.Context) {
 }
 
 func (c *Collector) collectAndPublish(ctx context.Context) {
-	uptimeSeconds, err := readUptime()
-	if err != nil {
-		slog.Error("Failed to read server uptime, skipping this tick", "error", err)
-		return
-	}
-
 	event := model.ResourcesEvent{
 		SystemID:      c.identity.System.ID,
 		SystemName:    c.identity.System.Name,
 		ServerName:    c.identity.Server.Name,
 		ServerIP:      c.identity.Server.IP,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
-		UptimeSeconds: uptimeSeconds,
+		UptimeSeconds: readUptime(),
 	}
 	event.CPU = c.cpuGroup()
 	event.Memory, event.Swap = memoryAndSwap()
@@ -97,29 +91,29 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	c.publisher.PublishBatch(ctx, c.channel, [][]byte{payload})
 }
 
-// readUptime is required, unlike every other metric: without it the tick is
-// skipped entirely.
-func readUptime() (int64, error) {
+// readUptime returns nil when /proc/uptime can't be read, so the field is
+// omitted and the rest of the event still publishes.
+func readUptime() *int64 {
 	data, err := uptime.Read()
-	if err != nil {
-		return 0, err
+	if err == nil {
+		var sample uptime.Sample
+		if sample, err = uptime.Parse(data); err == nil {
+			return ptr(uptime.Seconds(sample))
+		}
 	}
-	sample, err := uptime.Parse(data)
-	if err != nil {
-		return 0, err
-	}
-	return uptime.Seconds(sample), nil
+	slog.Warn("Failed to read server uptime, omitting from this tick", "path", uptime.Path, "error", err)
+	return nil
 }
 
-// cpuGroup combines the busy percentage and the load averages. They come from
-// different files, so each part is filled independently and the group is
-// omitted only when neither is available.
+// cpuGroup combines the CPU count, the busy percentage and the load averages.
+// They come from different files, so each part is filled independently and the
+// group is omitted only when none is available.
 func (c *Collector) cpuGroup() *model.CPUGroup {
 	var group model.CPUGroup
-	c.addCPUPercent(&group)
+	c.addCPUStat(&group)
 	addLoad(&group)
 
-	if group.UsedPercent == nil && group.Load1 == nil {
+	if group.Count == nil && group.UsedPercent == nil && group.Load1 == nil {
 		return nil
 	}
 	return &group
@@ -142,10 +136,11 @@ func addLoad(group *model.CPUGroup) {
 	slog.Warn("Failed to read load average, omitting from this tick", "path", load.Path, "error", err)
 }
 
-// addCPUPercent differences this tick's /proc/stat against the previous one,
-// so the value is the mean over the whole interval rather than an instant.
-// The first tick has nothing to difference against and omits the field.
-func (c *Collector) addCPUPercent(group *model.CPUGroup) {
+// addCPUStat fills the CPU count and busy percentage from /proc/stat. The
+// percentage differences this tick against the previous one, so it is the mean
+// over the whole interval rather than an instant; the first tick has nothing
+// to difference against and omits it. The count needs no baseline.
+func (c *Collector) addCPUStat(group *model.CPUGroup) {
 	data, err := cpu.Read()
 	if err != nil {
 		slog.Warn("Failed to read CPU stats, omitting from this tick", "path", cpu.Path, "error", err)
@@ -156,6 +151,10 @@ func (c *Collector) addCPUPercent(group *model.CPUGroup) {
 	if err != nil {
 		slog.Warn("Failed to parse CPU stats, omitting from this tick", "path", cpu.Path, "error", err)
 		return
+	}
+
+	if n, ok := cpu.Count(now); ok {
+		group.Count = ptr(n)
 	}
 
 	prev := c.prevCPU
@@ -190,7 +189,7 @@ func memoryAndSwap() (*model.MemoryGroup, *model.SwapGroup) {
 }
 
 // networkGroup differences this tick's /proc/net/dev against the previous one
-// to get download (rx) and upload (tx) bytes per second. Like addCPUPercent,
+// to get download (rx) and upload (tx) bytes per second. Like the CPU percentage,
 // the first tick has no baseline and omits the group.
 func (c *Collector) networkGroup() *model.NetworkGroup {
 	data, err := network.Read()

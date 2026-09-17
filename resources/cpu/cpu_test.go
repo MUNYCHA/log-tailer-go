@@ -93,3 +93,43 @@ func TestPercent_IdleGrewFasterThanTotal(t *testing.T) {
 		t.Fatal("expected an unusable window when idle outpaces total")
 	}
 }
+
+func TestParse_CountsPerCPULines(t *testing.T) {
+	data := "cpu  10 20 30 40 50 0 0 0 0 0\n" +
+		"cpu0 1 2 3 4 5 0 0 0 0 0\n" +
+		"cpu1 1 2 3 4 5 0 0 0 0 0\n" +
+		"cpu2 1 2 3 4 5 0 0 0 0 0\n" +
+		"intr 12345\nctxt 678\n"
+	got, err := Parse([]byte(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.CPUs != 3 {
+		t.Fatalf("expected 3 per-CPU lines, got %d", got.CPUs)
+	}
+	// Per-CPU lines must not be added to the aggregate totals
+	if got.Total != 150 {
+		t.Fatalf("expected total 150 from the aggregate line only, got %d", got.Total)
+	}
+}
+
+func TestParse_OfflineCPUsAreNotListed(t *testing.T) {
+	// The kernel omits offline CPUs from /proc/stat, so cpu1 missing means
+	// two CPUs are online, not three
+	got, err := Parse([]byte("cpu  1 1 1 1 1 0 0 0 0 0\ncpu0 1 1 1 1 1 0 0 0 0 0\ncpu2 1 1 1 1 1 0 0 0 0 0\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.CPUs != 2 {
+		t.Fatalf("expected 2 online CPUs, got %d", got.CPUs)
+	}
+}
+
+func TestCount(t *testing.T) {
+	if n, ok := Count(Sample{CPUs: 8}); !ok || n != 8 {
+		t.Fatalf("expected 8 ok, got %d ok=%v", n, ok)
+	}
+	if _, ok := Count(Sample{}); ok {
+		t.Fatal("expected no count when no per-CPU lines were listed")
+	}
+}

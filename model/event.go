@@ -21,7 +21,7 @@ type ResourcesEvent struct {
 	ServerName    string `json:"serverName"`
 	ServerIP      string `json:"serverIp"`
 	Timestamp     string `json:"timestamp"`
-	UptimeSeconds int64  `json:"uptimeSeconds"`
+	UptimeSeconds *int64 `json:"uptimeSeconds,omitempty"`
 
 	CPU     *CPUGroup     `json:"cpu,omitempty"`
 	Memory  *MemoryGroup  `json:"memory,omitempty"`
@@ -32,6 +32,9 @@ type ResourcesEvent struct {
 // CPUGroup comes from two files that fail independently, so each part is a
 // pointer: the group is omitted only when neither can be read.
 type CPUGroup struct {
+	// Online logical CPUs, from the per-CPU lines of /proc/stat
+	Count *int `json:"count,omitempty"`
+
 	// Mean busy percentage over the interval since the previous tick, from
 	// /proc/stat. Omitted on the first tick after start (and after a
 	// supervised restart), when there is no previous sample to difference.
