@@ -1,9 +1,10 @@
 // Package storage publishes disk usage for the configured mounts per interval.
 //
-// The collector here only orchestrates. The disk subpackage has the same three
-// steps as every metric — read.go touches the server, parse.go turns raw data
-// into numbers, calculate.go turns numbers into the published values — so this
-// file never calls statfs or does arithmetic itself.
+// The collector here only orchestrates. The disk and mounts subpackages have
+// the same three steps as every metric — read.go touches the server, parse.go
+// turns raw data into values, calculate.go turns values into what is
+// published — so this file never calls statfs, reads the mount table or does
+// arithmetic itself.
 package storage
 
 import (
@@ -15,6 +16,7 @@ import (
 	"log-tailer-go/config"
 	"log-tailer-go/model"
 	"log-tailer-go/storage/disk"
+	"log-tailer-go/storage/mounts"
 )
 
 // Publisher ships a batch of serialized events to a pub/sub channel in one
@@ -60,10 +62,12 @@ func (c *Collector) Run(ctx context.Context) {
 }
 
 func (c *Collector) collectAndPublish(ctx context.Context) {
+	table := readMountTable()
+
 	// Built non-nil so an empty mounts list publishes [] rather than null
-	mounts := make([]model.MountUsage, len(c.mounts))
+	usage := make([]model.MountUsage, len(c.mounts))
 	for i, path := range c.mounts {
-		mounts[i] = mountUsage(path)
+		usage[i] = mountUsage(table, path)
 	}
 
 	event := model.StorageEvent{
@@ -72,7 +76,7 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 		ServerName: c.identity.Server.Name,
 		ServerIP:   c.identity.Server.IP,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Mounts:     mounts,
+		Mounts:     usage,
 	}
 
 	payload, err := json.Marshal(event)
@@ -84,9 +88,30 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	c.publisher.PublishBatch(ctx, c.channel, [][]byte{payload})
 }
 
-// mountUsage reports one mount. A mount that can't be statted is still listed,
-// with Error set, so the consumer sees it is down rather than missing.
-func mountUsage(path string) model.MountUsage {
+// readMountTable returns the parsed mount table, or nil when it can't be read.
+// Read once per tick and shared by every configured path.
+func readMountTable() []mounts.Entry {
+	data, err := mounts.Read()
+	if err != nil {
+		slog.Warn("Failed to read mount table, reporting mounts without device, fsType or network check", "path", mounts.Path, "error", err)
+		return nil
+	}
+	return mounts.Parse(data)
+}
+
+// errNetworkFS is published for a configured path on a network filesystem.
+const errNetworkFS = "network filesystem not supported"
+
+// mountUsage reports one configured path. A path that can't be statted is
+// still listed, with Error set, so the consumer sees it is down rather than
+// missing. A path on a network filesystem is never statted: statfs there can
+// block until the remote server answers, which would hold up the whole event.
+func mountUsage(table []mounts.Entry, path string) model.MountUsage {
+	entry, found := mounts.Find(table, path)
+	if found && mounts.IsNetwork(entry.FSType) {
+		return model.MountUsage{Path: path, FSType: entry.FSType, Error: errNetworkFS}
+	}
+
 	stat, err := disk.Read(path)
 	if err != nil {
 		slog.Warn("Failed to stat mount, reporting as unavailable", "path", path, "error", err)
@@ -95,11 +120,15 @@ func mountUsage(path string) model.MountUsage {
 
 	usage := disk.ToBytes(disk.Parse(stat))
 	return model.MountUsage{
-		Path:          path,
-		TotalBytes:    usage.TotalBytes,
-		UsedBytes:     usage.UsedBytes,
-		FreeBytes:     usage.FreeBytes,
-		ReservedBytes: usage.ReservedBytes,
-		UsedPercent:   usage.UsedPercent,
+		Path:   path,
+		Device: entry.Device,
+		FSType: entry.FSType,
+		DiskUsage: &model.DiskUsage{
+			TotalBytes:    usage.TotalBytes,
+			UsedBytes:     usage.UsedBytes,
+			FreeBytes:     usage.FreeBytes,
+			ReservedBytes: usage.ReservedBytes,
+			UsedPercent:   usage.UsedPercent,
+		},
 	}
 }
