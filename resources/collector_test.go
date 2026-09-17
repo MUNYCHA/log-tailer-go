@@ -172,11 +172,20 @@ func TestCollector_PublishesLoadMemoryAndSwapFromRealProc(t *testing.T) {
 	if ev.Memory.AvailableBytes > ev.Memory.TotalBytes {
 		t.Fatalf("expected memory available <= total, got %d > %d", ev.Memory.AvailableBytes, ev.Memory.TotalBytes)
 	}
+	if ev.Memory.UsedBytes+ev.Memory.AvailableBytes != ev.Memory.TotalBytes {
+		t.Fatalf("expected memory used + available = total, got %+v", *ev.Memory)
+	}
+	if ev.Memory.UsedPercent < 0 || ev.Memory.UsedPercent > 100 {
+		t.Fatalf("expected memory.usedPercent in [0,100], got %f", ev.Memory.UsedPercent)
+	}
 	if ev.Swap == nil {
 		t.Fatal("expected the swap group to be present")
 	}
 	if ev.Swap.UsedBytes > ev.Swap.TotalBytes {
 		t.Fatalf("expected swap used <= total, got %d > %d", ev.Swap.UsedBytes, ev.Swap.TotalBytes)
+	}
+	if ev.Swap.UsedPercent < 0 || ev.Swap.UsedPercent > 100 {
+		t.Fatalf("expected swap.usedPercent in [0,100], got %f", ev.Swap.UsedPercent)
 	}
 }
 

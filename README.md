@@ -126,11 +126,15 @@ When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, sw
   },
   "memory": {
     "totalBytes": 16466874368,
-    "availableBytes": 14146666496
+    "usedBytes": 2320207872,
+    "availableBytes": 14146666496,
+    "usedPercent": 14.09,
+    "estimated": false
   },
   "swap": {
     "totalBytes": 4294967296,
-    "usedBytes": 102400000
+    "usedBytes": 102400000,
+    "usedPercent": 2.38
   },
   "network": {
     "rxBytesPerSec": 184320.5,
@@ -149,12 +153,24 @@ Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, 
 | `/proc/loadavg` | `cpu.load1`, `cpu.load5`, `cpu.load15` | All three omitted, the tick still publishes |
 | `/proc/stat` | `cpu.count`, `cpu.usedPercent` | Both omitted, the tick still publishes |
 | `/proc/loadavg` and `/proc/stat` | the whole `cpu` group | Omitted, the tick still publishes |
-| `/proc/meminfo` | the whole `memory` and `swap` groups | Both omitted, the tick still publishes |
+| `/proc/meminfo` unreadable | the whole `memory` and `swap` groups | Both omitted, the tick still publishes |
+| `/proc/meminfo` without `MemTotal`, or without both `MemAvailable` and the estimate lines | the whole `memory` group | Omitted, `swap` still publishes |
+| `/proc/meminfo` without `SwapTotal`/`SwapFree` | the whole `swap` group | Omitted, `memory` still publishes |
 | `/proc/net/dev` | the whole `network` group | Omitted, the tick still publishes |
 
 `cpu.count` is the number of online logical CPUs (the `cpu0` … `cpuN` lines of `/proc/stat`, the same figure as `nproc`). Load average is measured against it: `load1` of 4 is a full 4-CPU server but a mostly idle 64-CPU one. Unlike `cpu.usedPercent` it needs no previous sample, so it is present from the first tick.
 
-Memory values are bytes (`/proc/meminfo` reports kB, multiplied by 1024). `memory.availableBytes` is `MemAvailable`, not `MemFree`, so it accounts for reclaimable page cache. `swap.usedBytes` is `SwapTotal - SwapFree`.
+Memory values are bytes (`/proc/meminfo` reports kB, multiplied by 1024). `memory.availableBytes` is `MemAvailable`, not `MemFree`, so it accounts for reclaimable page cache. `memory.usedBytes` is `MemTotal - available` and `memory.usedPercent` is `used / MemTotal × 100`, so used and available always add up to total.
+
+`MemAvailable` only exists on kernel 3.14+ (and kernels it was backported to, such as RHEL/CentOS 7). Without it, available memory is **estimated** and `memory.estimated` is `true`:
+
+```
+available = MemFree + Buffers + Cached + SReclaimable - Shmem
+```
+
+`Shmem` (tmpfs, shared memory) is counted inside `Cached` but can't be freed, so it is taken back out. The estimate is usually within a few percent of what `MemAvailable` would report and reads slightly more available, because it ignores the kernel's small emergency reserve. `memory.totalBytes` is always exact. The agent checks whether the `MemAvailable` line exists, never the kernel version, so a backported kernel reports exact values.
+
+`swap.usedBytes` is `SwapTotal - SwapFree` and `swap.usedPercent` is `used / SwapTotal × 100`. A server with no swap reports `swap` with all values `0`.
 
 `cpu.usedPercent` is the **mean busy percentage over the whole interval**, not an instantaneous reading — it differences two `/proc/stat` samples one `resources.interval` apart:
 

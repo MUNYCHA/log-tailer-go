@@ -46,16 +46,24 @@ type CPUGroup struct {
 	Load15 *float64 `json:"load15,omitempty"`
 }
 
-// MemoryGroup is RAM from /proc/meminfo, in bytes (the file is kB).
+// MemoryGroup is RAM from /proc/meminfo, in bytes (the file is kB). Used is
+// total - available. Estimated is true when the kernel has no MemAvailable and
+// available was calculated from reclaimable memory instead, so used,
+// available and the percentage are close but not exact; total is always exact.
 type MemoryGroup struct {
-	TotalBytes     uint64 `json:"totalBytes"`
-	AvailableBytes uint64 `json:"availableBytes"`
+	TotalBytes     uint64  `json:"totalBytes"`
+	UsedBytes      uint64  `json:"usedBytes"`
+	AvailableBytes uint64  `json:"availableBytes"`
+	UsedPercent    float64 `json:"usedPercent"`
+	Estimated      bool    `json:"estimated"`
 }
 
 // SwapGroup is swap from /proc/meminfo, in bytes. Used is SwapTotal - SwapFree.
+// A server with no swap reports all zeros.
 type SwapGroup struct {
-	TotalBytes uint64 `json:"totalBytes"`
-	UsedBytes  uint64 `json:"usedBytes"`
+	TotalBytes  uint64  `json:"totalBytes"`
+	UsedBytes   uint64  `json:"usedBytes"`
+	UsedPercent float64 `json:"usedPercent"`
 }
 
 // NetworkGroup is the mean download (rx) and upload (tx) rate since the
