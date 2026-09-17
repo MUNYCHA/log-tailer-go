@@ -28,8 +28,8 @@ Tick a box when that item is built, tested and merged to `dev`.
 | 14 | Storage — mount | Add `device`, `fsType` from mount table | [x] |
 | 15 | Storage — mount | Network paths reported as not supported | [x] |
 | 16 | Storage — mount | `mounts` optional in config | [x] |
-| 17 | Storage — server total | `server` group from mount table | [ ] |
-| 18 | Storage — server total | `partial` flag | [ ] |
+| 17 | Storage — server total | `server` group from mount table | [x] |
+| 18 | Storage — server total | `partial` flag | [x] |
 
 ---
 

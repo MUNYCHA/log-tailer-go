@@ -143,3 +143,70 @@ func TestCollector_NoMountsPublishesEmptyList(t *testing.T) {
 		t.Fatalf("expected mounts to be [], got %s", got)
 	}
 }
+
+func TestCollector_PublishesServerTotal(t *testing.T) {
+	pub := &fakePublisher{}
+	c := New(nil, "storage-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events(t)
+	if len(events) == 0 {
+		t.Fatal("expected at least one storage event")
+	}
+	server := events[0].Server
+	if server == nil {
+		t.Fatal("expected a server total on a host with a local root filesystem")
+	}
+	if server.TotalBytes == 0 {
+		t.Fatal("expected a non-zero server totalBytes")
+	}
+	if server.UsedBytes+server.FreeBytes+server.ReservedBytes != server.TotalBytes {
+		t.Fatalf("expected used + free + reserved = total, got %+v", *server)
+	}
+	if server.UsedPercent < 0 || server.UsedPercent > 100 {
+		t.Fatalf("expected usedPercent in [0,100], got %f", server.UsedPercent)
+	}
+}
+
+func TestServerStorage_UnreadableFilesystemIsPartial(t *testing.T) {
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+	table := []mounts.Entry{
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "/dev/sdb1", Path: "/this/path/does/not/exist/hopefully", FSType: "xfs"},
+	}
+	got := c.serverStorage(table)
+	if got == nil {
+		t.Fatal("expected a total from the readable filesystem")
+	}
+	if !got.Partial {
+		t.Fatal("expected partial true when a local filesystem can't be read")
+	}
+	if !c.failing["/this/path/does/not/exist/hopefully"] {
+		t.Fatal("expected the failure to be remembered so it is logged once")
+	}
+}
+
+func TestServerStorage_NothingReadableOmitsTotal(t *testing.T) {
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+	if got := c.serverStorage(nil); got != nil {
+		t.Fatalf("expected no total without a mount table, got %+v", got)
+	}
+	table := []mounts.Entry{{Device: "/dev/sdb1", Path: "/this/path/does/not/exist/hopefully", FSType: "ext4"}}
+	if got := c.serverStorage(table); got != nil {
+		t.Fatalf("expected no total when no filesystem can be read, got %+v", got)
+	}
+	payload, err := json.Marshal(model.StorageEvent{Mounts: []model.MountUsage{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["server"]; ok {
+		t.Fatalf("expected server omitted when nil, got %s", payload)
+	}
+}

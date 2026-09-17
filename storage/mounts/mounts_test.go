@@ -138,3 +138,51 @@ func TestRead_RealMountTable(t *testing.T) {
 		t.Fatal("expected the real mount table to hold /")
 	}
 }
+
+func TestLocalFilesystems_RealWSLTable(t *testing.T) {
+	got := LocalFilesystems(Parse([]byte(sampleMounts)))
+	want := []Entry{
+		{Device: "/dev/sdd", Path: "/", FSType: "ext4"},
+		{Device: "/dev/sdb1", Path: "/mnt/my disk", FSType: "xfs"},
+		{Device: "/dev/sdf", Path: "/mnt/wsl/docker-desktop/docker-desktop-user-distro", FSType: "ext4"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d local filesystems, got %d: %+v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("entry %d: expected %+v, got %+v", i, want[i], got[i])
+		}
+	}
+}
+
+func TestLocalFilesystems_ShortestPathOwnsTheDevice(t *testing.T) {
+	// The bind mount is listed first, but "/" must be the entry kept
+	got := LocalFilesystems([]Entry{
+		{Device: "/dev/sda1", Path: "/srv/bind", FSType: "ext4"},
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "/dev/sda1", Path: "/home", FSType: "ext4"},
+	})
+	if len(got) != 1 || got[0].Path != "/" {
+		t.Fatalf("expected only / for /dev/sda1, got %+v", got)
+	}
+}
+
+func TestLocalFilesystems_SkipsLoopAndNonLocal(t *testing.T) {
+	got := LocalFilesystems([]Entry{
+		{Device: "/dev/loop3", Path: "/snap/core/1", FSType: "ext4"},
+		{Device: "nas:/export", Path: "/mnt/nas", FSType: "nfs4"},
+		{Device: "tmpfs", Path: "/run", FSType: "tmpfs"},
+		{Device: "tank/data", Path: "/tank", FSType: "zfs"},
+		{Device: "/dev/sda2", Path: "/boot/efi", FSType: "vfat"},
+	})
+	if len(got) != 1 || got[0].Path != "/boot/efi" {
+		t.Fatalf("expected only /boot/efi, got %+v", got)
+	}
+}
+
+func TestLocalFilesystems_Empty(t *testing.T) {
+	if got := LocalFilesystems(nil); len(got) != 0 {
+		t.Fatalf("expected none, got %+v", got)
+	}
+}

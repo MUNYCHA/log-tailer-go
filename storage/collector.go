@@ -1,4 +1,5 @@
-// Package storage publishes disk usage for the configured mounts per interval.
+// Package storage publishes the server's total local storage and disk usage
+// for the configured mounts per interval.
 //
 // The collector here only orchestrates. The disk and mounts subpackages have
 // the same three steps as every metric — read.go touches the server, parse.go
@@ -31,6 +32,11 @@ type Collector struct {
 	identity  config.IdentityConfig
 	interval  time.Duration
 	publisher Publisher
+
+	// Local filesystems that failed to stat on the previous tick, so a failure
+	// is logged when it starts and when it clears rather than on every tick.
+	// Only ever touched from Run's goroutine, so it needs no lock.
+	failing map[string]bool
 }
 
 func New(mounts []string, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
@@ -40,6 +46,7 @@ func New(mounts []string, channel string, identity config.IdentityConfig, interv
 		identity:  identity,
 		interval:  interval,
 		publisher: publisher,
+		failing:   make(map[string]bool),
 	}
 }
 
@@ -76,6 +83,7 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 		ServerName: c.identity.Server.Name,
 		ServerIP:   c.identity.Server.IP,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Server:     c.serverStorage(table),
 		Mounts:     usage,
 	}
 
@@ -97,6 +105,52 @@ func readMountTable() []mounts.Entry {
 		return nil
 	}
 	return mounts.Parse(data)
+}
+
+// serverStorage sums every local filesystem in the mount table, each counted
+// once. A filesystem that can't be statted is left out and marks the total
+// partial; the total is omitted when none can be read. Network filesystems
+// are never in the table's local set, so this never blocks on a dead remote.
+func (c *Collector) serverStorage(table []mounts.Entry) *model.ServerStorage {
+	var usages []disk.Usage
+	partial := false
+	for _, fs := range mounts.LocalFilesystems(table) {
+		stat, err := disk.Read(fs.Path)
+		if err != nil {
+			partial = true
+			if !c.failing[fs.Path] {
+				slog.Warn("Failed to stat local filesystem, server storage total is partial", "path", fs.Path, "device", fs.Device, "error", err)
+				c.failing[fs.Path] = true
+			}
+			continue
+		}
+		if c.failing[fs.Path] {
+			slog.Info("Local filesystem readable again", "path", fs.Path, "device", fs.Device)
+			delete(c.failing, fs.Path)
+		}
+
+		usage := disk.ToBytes(disk.Parse(stat))
+		if usage.TotalBytes == 0 {
+			continue
+		}
+		usages = append(usages, usage)
+	}
+
+	if len(usages) == 0 {
+		return nil
+	}
+
+	total := disk.Total(usages)
+	return &model.ServerStorage{
+		DiskUsage: model.DiskUsage{
+			TotalBytes:    total.TotalBytes,
+			UsedBytes:     total.UsedBytes,
+			FreeBytes:     total.FreeBytes,
+			ReservedBytes: total.ReservedBytes,
+			UsedPercent:   total.UsedPercent,
+		},
+		Partial: partial,
+	}
 }
 
 // errNetworkFS is published for a configured path on a network filesystem.

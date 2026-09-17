@@ -2,6 +2,7 @@ package mounts
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -61,4 +62,37 @@ func contains(mnt, path string) bool {
 		return strings.HasPrefix(path, "/")
 	}
 	return path == mnt || strings.HasPrefix(path, mnt+"/")
+}
+
+// LocalFilesystems picks the filesystems that make up the server's own
+// storage, each counted once:
+//
+//   - local types only (tmpfs, overlay, network and unknown types are skipped)
+//   - /dev/loop* devices skipped: snaps and images, not server disks
+//   - one entry per device, keeping the shortest mount point, so bind mounts
+//     and btrfs subvolumes of one disk don't count it twice and "/" is the
+//     entry that represents the root disk on every tick
+func LocalFilesystems(entries []Entry) []Entry {
+	var local []Entry
+	for _, e := range entries {
+		if !IsLocal(e.FSType) || strings.HasPrefix(e.Device, "/dev/loop") {
+			continue
+		}
+		local = append(local, e)
+	}
+
+	sort.SliceStable(local, func(i, j int) bool {
+		return len(local[i].Path) < len(local[j].Path)
+	})
+
+	seen := make(map[string]bool, len(local))
+	unique := local[:0]
+	for _, e := range local {
+		if seen[e.Device] {
+			continue
+		}
+		seen[e.Device] = true
+		unique = append(unique, e)
+	}
+	return unique
 }

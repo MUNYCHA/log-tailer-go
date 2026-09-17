@@ -17,7 +17,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Structured logging via `log/slog`
 - Config file may be JSON or YAML, auto-detected by extension
 - Optional resources collector publishes server uptime, load average, CPU utilisation, memory/swap and network throughput as one JSON event on its own timer
-- Optional storage collector publishes disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
+- Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collectors, so a wedged storage read can't make a healthy server look down
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
@@ -63,8 +63,8 @@ log-tailer-go/
 │   ├── collector.go     — every interval: runs read → parse → calculate for each mount,
 │   │                      builds one storage event, publishes it
 │   ├── collector_test.go
-│   ├── mounts/          — /proc/self/mounts → device, fsType, local or network, for each path
-│   └── disk/            — statfs on each mount → total/used/free/reserved bytes, used %
+│   ├── mounts/          — /proc/self/mounts → device, fsType, local or network per path; unique local filesystems
+│   └── disk/            — statfs → total/used/free/reserved bytes, used %; server-wide total
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
@@ -192,7 +192,7 @@ The `network` group follows the same omission rules as `cpu.usedPercent`: absent
 
 ### Storage
 
-When `storage.enabled` is `true`, disk usage for each path in `storage.mounts` is published to `storage.channel` every `storage.interval`:
+When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` every `storage.interval`:
 
 ```json
 {
@@ -201,6 +201,14 @@ When `storage.enabled` is `true`, disk usage for each path in `storage.mounts` i
   "serverName": "your-server-name",
   "serverIp": "10.0.0.5",
   "timestamp": "2026-05-28T10:00:00Z",
+  "server": {
+    "totalBytes": 225485783040,
+    "usedBytes": 53502541824,
+    "freeBytes": 160709131878,
+    "reservedBytes": 11274109338,
+    "usedPercent": 24.97,
+    "partial": false
+  },
   "mounts": [
     { "path": "/", "device": "/dev/sda1", "fsType": "ext4", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151582326374, "reservedBytes": 10737238426, "usedPercent": 25.7 },
     { "path": "/var/log", "device": "/dev/sdb1", "fsType": "xfs", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9126805504, "reservedBytes": 536870912, "usedPercent": 10.53 },
@@ -220,7 +228,28 @@ Values come from `statfs` and match `df -B1` column for column:
 | `reservedBytes` | `(f_bfree − f_bavail) × f_frsize` — writable by root only (ext4 keeps 5% by default) | not shown |
 | `usedPercent` | `used / (used + free) × 100` | Use% (df rounds up) |
 
-`used + free + reserved = total`. `usedPercent` uses df's formula, so `100` means apps can no longer write even though root-reserved space is left. Sizes use `f_frsize`, the unit the block counts are in; `f_bsize` is only an I/O hint. Every subtraction is guarded, so a filesystem reporting inconsistent counts gets `0` rather than an underflowed number.
+`used + free + reserved = total`. The same fields and formulas are used for `server` and for each mount. `usedPercent` uses df's formula, so `100` means apps can no longer write even though root-reserved space is left. Sizes use `f_frsize`, the unit the block counts are in; `f_bsize` is only an I/O hint. Every subtraction is guarded, so a filesystem reporting inconsistent counts gets `0` rather than an underflowed number.
+
+#### Server total
+
+`server` is the server's **mounted local storage**, found from `/proc/self/mounts` on every tick. It does not depend on `storage.mounts`: an admin who lists only `/` still gets every local disk in the total.
+
+1. Keep local filesystem types only: `ext2`, `ext3`, `ext4`, `xfs`, `btrfs`, `vfat`. RAM and kernel filesystems (`tmpfs`, `proc`, …), layers (`overlay`, `squashfs`), network filesystems and any unknown type are skipped.
+2. Skip `/dev/loop*` devices (snaps and images).
+3. Count each device once, keeping its shortest mount point, so bind mounts, Docker bind mounts and btrfs subvolumes of one disk don't double the total.
+4. `statfs` each one and sum the bytes. `usedPercent` is recalculated from the sums with df's formula, never an average of per-disk percentages.
+
+| Case | Published |
+|---|---|
+| Every local filesystem read | `server` with `partial: false` |
+| Some local filesystem can't be statted | `server` summed without it, `partial: true` |
+| None can be read, or no mount table | `server` omitted |
+
+`partial: true` means the total is smaller than the server really has. A failure is logged once when it starts and once when it clears.
+
+The total measures mounted, usable storage — not the size of the physical disks: unmounted partitions, swap partitions and unallocated LVM space are not counted. On ext4 and xfs (with or without LVM or mdadm) it equals the sum of `df` for each disk. btrfs figures are the kernel's own estimate, as in `df`. A filesystem type outside the list above is not counted. Network filesystems are never touched, so the total can't block on a dead remote server.
+
+#### Mounts
 
 Mounts are reported in config order. A path doesn't have to be a mount point: `/var/log` reports the filesystem it lives on. `device` and `fsType` come from `/proc/self/mounts`, read once per tick — the entry whose mount point is the longest whole-component match for the path. Two paths showing the same `device` share one disk, so filling one fills the other.
 
@@ -235,7 +264,7 @@ When a path has no reading, it is published with only an `error`, never with zer
 
 Network paths are **never statted**: `statfs` on a mount whose server is down can block until the server answers, which would hold up the whole storage event. The rest of the mounts still publish normally. If the mount table itself can't be read, paths are statted without `device`, `fsType` or the network check.
 
-`storage.mounts` may be empty, in which case `mounts` is published as `[]`.
+`storage.mounts` may be empty, in which case `mounts` is published as `[]` and `server` is still reported.
 
 Storage runs as its own component, separate from resources, so a `statfs` stuck on a dead mount only delays the storage event — CPU, memory and the heartbeat keep publishing.
 
