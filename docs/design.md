@@ -46,7 +46,7 @@ Mark an item ✅ when it is built, tested and merged to `dev`; ⬜ means not don
 
 | Setting | What breaks |
 |---|---|
-| `ProcSubset=pid`, `ProtectProc=` | cpu, memory, swap missing |
+| `ProcSubset=pid` | uptime, cpu, memory, swap, network missing |
 | `ProtectHome=yes` / `tmpfs` | `/home` disk hidden from storage |
 | `InaccessiblePaths=`, `TemporaryFileSystem=` on a disk path | that disk hidden or wrong |
 
@@ -116,6 +116,7 @@ resources/
 └── network/
 storage/
 ├── collector.go
+├── mounts/
 └── disk/
 ```
 
@@ -258,7 +259,8 @@ agent checks whether the line exists, not the kernel version.
 | Missing case | Result |
 |---|---|
 | No `MemAvailable` | estimate, `estimated: true` |
-| `/proc/meminfo` unreadable | `memory` omitted |
+| No `MemTotal`, or no `MemAvailable` and an estimate line missing | `memory` omitted, `swap` still sent |
+| `/proc/meminfo` unreadable, or a value isn't a number | `memory` omitted |
 
 ### 5.4 Swap
 
@@ -276,7 +278,8 @@ agent checks whether the line exists, not the kernel version.
 |---|---|
 | No swap on server | all `0` |
 | No `MemAvailable` | swap still sent |
-| `/proc/meminfo` unreadable | `swap` omitted |
+| No `SwapTotal` or `SwapFree` | `swap` omitted, `memory` still sent |
+| `/proc/meminfo` unreadable, or a value isn't a number | `swap` omitted |
 
 ### 5.5 Network
 
@@ -366,7 +369,7 @@ Source: `/proc/self/mounts`, read once per tick, used by both 6.3 and 6.4.
 - Each line → `device`, `path`, `fsType`; decode `\040` (space) and other octal escapes.
 - **Local** types: `ext2, ext3, ext4, xfs, btrfs, vfat`
 - **Network** types: `nfs, nfs4, cifs, smb3, ceph, glusterfs, fuse.sshfs, 9p`
-- Everything else (tmpfs, proc, overlay, squashfs, …) is ignored.
+- Everything else (tmpfs, proc, overlay, squashfs, …) is left out of the server total. A configured path on one is still reported in `mounts`.
 
 ### 6.3 Mounts (from config)
 
@@ -379,13 +382,17 @@ Source: `/proc/self/mounts`, read once per tick, used by both 6.3 and 6.4.
 
 - Checked in config order, one after another.
 - A path doesn't need to be a mount point: `/var/log` shows the disk it lives on.
+- The path is matched as written; symlinks are not resolved (that could block on a network mount).
 - No dedup here; every configured path is listed.
+- Only network filesystems are refused; any other type (e.g. tmpfs `/tmp`) is reported.
+- A failing path is logged once when it starts failing and once when it recovers.
 
 | Missing case | Result |
 |---|---|
 | Network filesystem | `{ path, fsType, error: "network filesystem not supported" }`, no `statfs` |
 | `statfs` fails | `{ path, error }`, other paths continue |
-| `mounts` empty or omitted | `mounts` empty, `server` still sent |
+| Mount table unreadable | paths statted without `device`, `fsType` or network check |
+| `mounts` empty or omitted | `mounts` is `[]`, `server` still sent |
 
 ### 6.4 Server total
 
@@ -409,6 +416,8 @@ mount table
 - Does not depend on config `mounts`.
 - `totalBytes` = mounted, usable storage (not physical disk size).
 - Percent is from the sums, never an average of each disk's percent.
+- Network filesystems are never statted, so the total can't block on a dead remote.
+- A failing filesystem is logged once when it starts failing and once when it recovers.
 
 | `partial` | Meaning |
 |---|---|
@@ -419,6 +428,7 @@ mount table
 |---|---|
 | Some filesystem unreadable | summed without it, `partial: true` |
 | No filesystem readable | `server` omitted |
+| Mount table unreadable | `server` omitted |
 
 | Setup | Accuracy |
 |---|---|
