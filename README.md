@@ -262,6 +262,8 @@ When a path has no reading, it is published with only an `error`, never with zer
 | Path can't be statted (typo, not mounted, permission) | `{ path, error }` |
 | Path is on a network filesystem (`nfs`, `nfs4`, `cifs`, `smb3`, `ceph`, `glusterfs`, `fuse.sshfs`, `9p`) | `{ path, fsType, error: "network filesystem not supported" }` |
 
+A failing path is logged once when it starts failing and once when it becomes readable again, not on every tick, so a typo'd path doesn't flood the journal.
+
 Network paths are **never statted**: `statfs` on a mount whose server is down can block until the server answers, which would hold up the whole storage event. The rest of the mounts still publish normally. If the mount table itself can't be read, paths are statted without `device`, `fsType` or the network check.
 
 `storage.mounts` may be empty, in which case `mounts` is published as `[]` and `server` is still reported.

@@ -33,20 +33,23 @@ type Collector struct {
 	interval  time.Duration
 	publisher Publisher
 
-	// Local filesystems that failed to stat on the previous tick, so a failure
-	// is logged when it starts and when it clears rather than on every tick.
-	// Only ever touched from Run's goroutine, so it needs no lock.
-	failing map[string]bool
+	// Local filesystems and configured mount paths that failed to stat on the
+	// previous tick, so a failure is logged when it starts and when it clears
+	// rather than on every tick. Kept apart because the same path can be both.
+	// Only ever touched from Run's goroutine, so they need no lock.
+	failing      map[string]bool
+	mountFailing map[string]bool
 }
 
 func New(mounts []string, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
 	return &Collector{
-		mounts:    mounts,
-		channel:   channel,
-		identity:  identity,
-		interval:  interval,
-		publisher: publisher,
-		failing:   make(map[string]bool),
+		mounts:       mounts,
+		channel:      channel,
+		identity:     identity,
+		interval:     interval,
+		publisher:    publisher,
+		failing:      make(map[string]bool),
+		mountFailing: make(map[string]bool),
 	}
 }
 
@@ -74,7 +77,7 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	// Built non-nil so an empty mounts list publishes [] rather than null
 	usage := make([]model.MountUsage, len(c.mounts))
 	for i, path := range c.mounts {
-		usage[i] = mountUsage(table, path)
+		usage[i] = c.mountUsage(table, path)
 	}
 
 	event := model.StorageEvent{
@@ -158,9 +161,10 @@ const errNetworkFS = "network filesystem not supported"
 
 // mountUsage reports one configured path. A path that can't be statted is
 // still listed, with Error set, so the consumer sees it is down rather than
-// missing. A path on a network filesystem is never statted: statfs there can
-// block until the remote server answers, which would hold up the whole event.
-func mountUsage(table []mounts.Entry, path string) model.MountUsage {
+// missing; the failure is logged once when it starts and once when it clears.
+// A path on a network filesystem is never statted: statfs there can block
+// until the remote server answers, which would hold up the whole event.
+func (c *Collector) mountUsage(table []mounts.Entry, path string) model.MountUsage {
 	entry, found := mounts.Find(table, path)
 	if found && mounts.IsNetwork(entry.FSType) {
 		return model.MountUsage{Path: path, FSType: entry.FSType, Error: errNetworkFS}
@@ -168,8 +172,15 @@ func mountUsage(table []mounts.Entry, path string) model.MountUsage {
 
 	stat, err := disk.Read(path)
 	if err != nil {
-		slog.Warn("Failed to stat mount, reporting as unavailable", "path", path, "error", err)
+		if !c.mountFailing[path] {
+			slog.Warn("Failed to stat mount, reporting as unavailable", "path", path, "error", err)
+			c.mountFailing[path] = true
+		}
 		return model.MountUsage{Path: path, Error: err.Error()}
+	}
+	if c.mountFailing[path] {
+		slog.Info("Mount readable again", "path", path)
+		delete(c.mountFailing, path)
 	}
 
 	usage := disk.ToBytes(disk.Parse(stat))

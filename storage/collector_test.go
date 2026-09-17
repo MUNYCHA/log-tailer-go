@@ -1,8 +1,13 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,7 +93,8 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 
 // A failed mount must publish only path and error, never zero sizes
 func TestMountUsage_ErrorOmitsSizesInJSON(t *testing.T) {
-	payload, err := json.Marshal(mountUsage(nil, "/this/path/does/not/exist/hopefully"))
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+	payload, err := json.Marshal(c.mountUsage(nil, "/this/path/does/not/exist/hopefully"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +120,8 @@ func TestMountUsage_NetworkFilesystemNotStatted(t *testing.T) {
 		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
 		{Device: "nas:/export", Path: "/no/such/nas", FSType: "nfs4"},
 	}
-	got := mountUsage(table, "/no/such/nas/share")
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+	got := c.mountUsage(table, "/no/such/nas/share")
 	want := model.MountUsage{Path: "/no/such/nas/share", FSType: "nfs4", Error: "network filesystem not supported"}
 	if got != want {
 		t.Fatalf("expected %+v, got %+v", want, got)
@@ -208,5 +215,47 @@ func TestServerStorage_NothingReadableOmitsTotal(t *testing.T) {
 	}
 	if _, ok := raw["server"]; ok {
 		t.Fatalf("expected server omitted when nil, got %s", payload)
+	}
+}
+
+// A failing path is logged when it starts failing and when it recovers, not on
+// every tick
+func TestMountUsage_FailureLoggedOncePerState(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "comes-and-goes")
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+
+	for i := 0; i < 3; i++ {
+		if got := c.mountUsage(nil, path); got.Error == "" {
+			t.Fatalf("tick %d: expected an error for a missing path", i)
+		}
+	}
+	if n := strings.Count(logs.String(), "Failed to stat mount"); n != 1 {
+		t.Fatalf("expected 1 failure log over 3 failing ticks, got %d:\n%s", n, logs.String())
+	}
+
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if got := c.mountUsage(nil, path); got.Error != "" {
+			t.Fatalf("tick %d: expected a reading after the path appeared, got %q", i, got.Error)
+		}
+	}
+	if n := strings.Count(logs.String(), "Mount readable again"); n != 1 {
+		t.Fatalf("expected 1 recovery log, got %d:\n%s", n, logs.String())
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	c.mountUsage(nil, path)
+	if n := strings.Count(logs.String(), "Failed to stat mount"); n != 2 {
+		t.Fatalf("expected a new failure log after failing again, got %d", n)
 	}
 }
