@@ -48,3 +48,21 @@ func ToBytes(s Sample) Usage {
 		UsedPercent:   usedPercent,
 	}
 }
+
+// Total adds up several filesystems into one server-wide usage. The
+// percentage is recalculated from the summed bytes with the same df formula,
+// never averaged: a full 100 GB disk and an empty 1 TB disk are 9% used, not
+// 50%. Callers pass each filesystem once.
+func Total(usages []Usage) Usage {
+	var t Usage
+	for _, u := range usages {
+		t.TotalBytes += u.TotalBytes
+		t.UsedBytes += u.UsedBytes
+		t.FreeBytes += u.FreeBytes
+		t.ReservedBytes += u.ReservedBytes
+	}
+	if t.UsedBytes+t.FreeBytes > 0 {
+		t.UsedPercent = float64(t.UsedBytes) / float64(t.UsedBytes+t.FreeBytes) * 100
+	}
+	return t
+}

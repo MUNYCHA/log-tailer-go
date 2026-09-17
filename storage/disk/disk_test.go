@@ -99,3 +99,37 @@ func TestToBytes_FreeAboveTotalDoesNotWrap(t *testing.T) {
 		t.Fatalf("expected 0%%, got %f", got.UsedPercent)
 	}
 }
+
+func TestTotal_PercentFromSumsNotAverage(t *testing.T) {
+	// 100 GB disk 90% used, 1000 GB disk 10% used (no reserved space)
+	const gb = 1000 * 1000 * 1000
+	got := Total([]Usage{
+		{TotalBytes: 100 * gb, UsedBytes: 90 * gb, FreeBytes: 10 * gb, UsedPercent: 90},
+		{TotalBytes: 1000 * gb, UsedBytes: 100 * gb, FreeBytes: 900 * gb, UsedPercent: 10},
+	})
+	if got.TotalBytes != 1100*gb || got.UsedBytes != 190*gb || got.FreeBytes != 910*gb {
+		t.Fatalf("expected summed bytes, got %+v", got)
+	}
+	want := float64(190) / float64(1100) * 100
+	if got.UsedPercent != want {
+		t.Fatalf("expected %f from sums (not the 50%% average), got %f", want, got.UsedPercent)
+	}
+}
+
+func TestTotal_KeepsTheSumsAddingUp(t *testing.T) {
+	a := ToBytes(Sample{Blocks: 1000, FreeBlocks: 400, AvailableBlocks: 300, BlockSize: 4096})
+	b := ToBytes(Sample{Blocks: 5000, FreeBlocks: 1000, AvailableBlocks: 750, BlockSize: 1024})
+	got := Total([]Usage{a, b})
+	if got.UsedBytes+got.FreeBytes+got.ReservedBytes != got.TotalBytes {
+		t.Fatalf("expected used + free + reserved = total, got %+v", got)
+	}
+	if got.ReservedBytes != a.ReservedBytes+b.ReservedBytes {
+		t.Fatalf("expected reserved summed, got %d", got.ReservedBytes)
+	}
+}
+
+func TestTotal_Empty(t *testing.T) {
+	if got := Total(nil); got != (Usage{}) {
+		t.Fatalf("expected zero usage, got %+v", got)
+	}
+}

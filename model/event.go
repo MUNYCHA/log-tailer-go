@@ -83,7 +83,19 @@ type StorageEvent struct {
 	ServerIP   string `json:"serverIp"`
 	Timestamp  string `json:"timestamp"`
 
+	// Nil when no local filesystem could be read
+	Server *ServerStorage `json:"server,omitempty"`
+
 	Mounts []MountUsage `json:"mounts"`
+}
+
+// ServerStorage is the server's mounted local storage summed over every local
+// filesystem, each counted once, independent of the configured mounts. Partial
+// is true when at least one local filesystem could not be read, so the totals
+// are smaller than the server really has.
+type ServerStorage struct {
+	DiskUsage
+	Partial bool `json:"partial"`
 }
 
 // MountUsage is one configured path: the filesystem it lives on and its usage.
