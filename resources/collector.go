@@ -167,25 +167,46 @@ func (c *Collector) addCPUStat(group *model.CPUGroup) {
 	}
 }
 
-// memoryAndSwap reads both groups from one /proc/meminfo sample, so they are
-// reported or omitted together.
+// memoryAndSwap reads both groups from one /proc/meminfo sample. An unreadable
+// file omits both; otherwise each group is omitted only when its own lines are
+// missing, so swap is still reported on a kernel memory can't be derived on.
 func memoryAndSwap() (*model.MemoryGroup, *model.SwapGroup) {
 	data, err := memory.Read()
-	if err == nil {
-		var sample memory.Sample
-		if sample, err = memory.Parse(data); err == nil {
-			usage := memory.ToBytes(sample)
-			return &model.MemoryGroup{
-					TotalBytes:     usage.TotalBytes,
-					AvailableBytes: usage.AvailableBytes,
-				}, &model.SwapGroup{
-					TotalBytes: usage.SwapTotalBytes,
-					UsedBytes:  usage.SwapUsedBytes,
-				}
-		}
+	if err != nil {
+		slog.Warn("Failed to read memory info, omitting from this tick", "path", memory.Path, "error", err)
+		return nil, nil
 	}
-	slog.Warn("Failed to read memory info, omitting from this tick", "path", memory.Path, "error", err)
-	return nil, nil
+	sample, err := memory.Parse(data)
+	if err != nil {
+		slog.Warn("Failed to parse memory info, omitting from this tick", "path", memory.Path, "error", err)
+		return nil, nil
+	}
+
+	var memGroup *model.MemoryGroup
+	if usage, ok := memory.Memory(sample); ok {
+		memGroup = &model.MemoryGroup{
+			TotalBytes:     usage.TotalBytes,
+			UsedBytes:      usage.UsedBytes,
+			AvailableBytes: usage.AvailableBytes,
+			UsedPercent:    usage.UsedPercent,
+			Estimated:      usage.Estimated,
+		}
+	} else {
+		slog.Warn("Memory lines missing, omitting memory from this tick", "path", memory.Path)
+	}
+
+	var swapGroup *model.SwapGroup
+	if usage, ok := memory.Swap(sample); ok {
+		swapGroup = &model.SwapGroup{
+			TotalBytes:  usage.TotalBytes,
+			UsedBytes:   usage.UsedBytes,
+			UsedPercent: usage.UsedPercent,
+		}
+	} else {
+		slog.Warn("Swap lines missing, omitting swap from this tick", "path", memory.Path)
+	}
+
+	return memGroup, swapGroup
 }
 
 // networkGroup differences this tick's /proc/net/dev against the previous one
