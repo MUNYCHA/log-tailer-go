@@ -9,6 +9,7 @@ import (
 
 	"log-tailer-go/config"
 	"log-tailer-go/model"
+	"log-tailer-go/storage/mounts"
 )
 
 // fakePublisher records published payloads. No Redis involved.
@@ -70,14 +71,53 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	if len(ev.Mounts) != 2 {
 		t.Fatalf("expected 2 mounts in event, got %d", len(ev.Mounts))
 	}
-	if ev.Mounts[0].Error != "" || ev.Mounts[0].TotalBytes == 0 {
-		t.Fatalf("expected / to have a reading and no error, got %+v", ev.Mounts[0])
+	root := ev.Mounts[0]
+	if root.Error != "" || root.DiskUsage == nil || root.TotalBytes == 0 {
+		t.Fatalf("expected / to have a reading and no error, got %+v", root)
+	}
+	if root.Device == "" || root.FSType == "" {
+		t.Fatalf("expected / to carry device and fsType from the mount table, got %+v", root)
 	}
 	if ev.Mounts[1].Error == "" {
 		t.Fatal("expected the bad mount path to have an error set")
 	}
-	if ev.Mounts[1].TotalBytes != 0 {
-		t.Fatalf("expected zero TotalBytes on error, got %d", ev.Mounts[1].TotalBytes)
+	if ev.Mounts[1].DiskUsage != nil {
+		t.Fatalf("expected no sizes on error, got %+v", ev.Mounts[1].DiskUsage)
+	}
+}
+
+// A failed mount must publish only path and error, never zero sizes
+func TestMountUsage_ErrorOmitsSizesInJSON(t *testing.T) {
+	payload, err := json.Marshal(mountUsage(nil, "/this/path/does/not/exist/hopefully"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"device", "fsType", "totalBytes", "usedBytes", "freeBytes", "reservedBytes", "usedPercent"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("expected %q omitted on error, got %s", key, payload)
+		}
+	}
+	if raw["path"] != "/this/path/does/not/exist/hopefully" || raw["error"] == "" {
+		t.Fatalf("expected path and error, got %s", payload)
+	}
+}
+
+// A network path is reported without calling statfs, so a dead NAS can't
+// block the event. The path doesn't exist, so a statfs would have failed with
+// a different error.
+func TestMountUsage_NetworkFilesystemNotStatted(t *testing.T) {
+	table := []mounts.Entry{
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "nas:/export", Path: "/no/such/nas", FSType: "nfs4"},
+	}
+	got := mountUsage(table, "/no/such/nas/share")
+	want := model.MountUsage{Path: "/no/such/nas/share", FSType: "nfs4", Error: "network filesystem not supported"}
+	if got != want {
+		t.Fatalf("expected %+v, got %+v", want, got)
 	}
 }
 

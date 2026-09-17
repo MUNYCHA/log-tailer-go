@@ -63,6 +63,7 @@ log-tailer-go/
 │   ├── collector.go     — every interval: runs read → parse → calculate for each mount,
 │   │                      builds one storage event, publishes it
 │   ├── collector_test.go
+│   ├── mounts/          — /proc/self/mounts → device, fsType, local or network, for each path
 │   └── disk/            — statfs on each mount → total/used/free/reserved bytes, used %
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
@@ -201,8 +202,10 @@ When `storage.enabled` is `true`, disk usage for each path in `storage.mounts` i
   "serverIp": "10.0.0.5",
   "timestamp": "2026-05-28T10:00:00Z",
   "mounts": [
-    { "path": "/", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151582326374, "reservedBytes": 10737238426, "usedPercent": 25.7 },
-    { "path": "/var/log", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9126805504, "reservedBytes": 536870912, "usedPercent": 10.53 }
+    { "path": "/", "device": "/dev/sda1", "fsType": "ext4", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151582326374, "reservedBytes": 10737238426, "usedPercent": 25.7 },
+    { "path": "/var/log", "device": "/dev/sdb1", "fsType": "xfs", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9126805504, "reservedBytes": 536870912, "usedPercent": 10.53 },
+    { "path": "/mnt/nas", "fsType": "nfs4", "error": "network filesystem not supported" },
+    { "path": "/missing", "error": "no such file or directory" }
   ]
 }
 ```
@@ -219,7 +222,20 @@ Values come from `statfs` and match `df -B1` column for column:
 
 `used + free + reserved = total`. `usedPercent` uses df's formula, so `100` means apps can no longer write even though root-reserved space is left. Sizes use `f_frsize`, the unit the block counts are in; `f_bsize` is only an I/O hint. Every subtraction is guarded, so a filesystem reporting inconsistent counts gets `0` rather than an underflowed number.
 
-Mounts are reported in config order. A mount that can't be statted (typo'd path, not mounted) is reported with an `error` field; its byte fields are present but meaningless, so treat a non-empty `error` as "no reading" rather than reading the zeros. The rest of the mounts still publish normally. `storage.mounts` may be empty, in which case `mounts` is published as `[]`.
+Mounts are reported in config order. A path doesn't have to be a mount point: `/var/log` reports the filesystem it lives on. `device` and `fsType` come from `/proc/self/mounts`, read once per tick — the entry whose mount point is the longest whole-component match for the path. Two paths showing the same `device` share one disk, so filling one fills the other.
+
+A path is matched as written; symlinks are not resolved, since resolving would touch every component of the path and could block on a dead network mount.
+
+When a path has no reading, it is published with only an `error`, never with zero sizes that would read as an empty disk:
+
+| Case | Published |
+|---|---|
+| Path can't be statted (typo, not mounted, permission) | `{ path, error }` |
+| Path is on a network filesystem (`nfs`, `nfs4`, `cifs`, `smb3`, `ceph`, `glusterfs`, `fuse.sshfs`, `9p`) | `{ path, fsType, error: "network filesystem not supported" }` |
+
+Network paths are **never statted**: `statfs` on a mount whose server is down can block until the server answers, which would hold up the whole storage event. The rest of the mounts still publish normally. If the mount table itself can't be read, paths are statted without `device`, `fsType` or the network check.
+
+`storage.mounts` may be empty, in which case `mounts` is published as `[]`.
 
 Storage runs as its own component, separate from resources, so a `statfs` stuck on a dead mount only delays the storage event — CPU, memory and the heartbeat keep publishing.
 

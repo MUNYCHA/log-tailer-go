@@ -74,7 +74,8 @@ type NetworkGroup struct {
 	TxBytesPerSec float64 `json:"txBytesPerSec"`
 }
 
-// StorageEvent is one snapshot of disk usage for the configured mounts.
+// StorageEvent is one snapshot of disk usage for the configured mounts, in
+// config order.
 type StorageEvent struct {
 	SystemID   string `json:"systemId"`
 	SystemName string `json:"systemName"`
@@ -85,14 +86,28 @@ type StorageEvent struct {
 	Mounts []MountUsage `json:"mounts"`
 }
 
+// MountUsage is one configured path: the filesystem it lives on and its usage.
 type MountUsage struct {
-	Path          string  `json:"path"`
+	Path   string `json:"path"`
+	Device string `json:"device,omitempty"`
+	FSType string `json:"fsType,omitempty"`
+
+	// Nil when the path could not be read, so a failed mount publishes only
+	// its path (and fsType when known) with Error, never zero sizes that
+	// would read as an empty disk
+	*DiskUsage
+
+	Error string `json:"error,omitempty"`
+}
+
+// DiskUsage is one filesystem's size in bytes, matching df -B1.
+// UsedBytes + FreeBytes + ReservedBytes = TotalBytes.
+type DiskUsage struct {
 	TotalBytes    uint64  `json:"totalBytes"`
 	UsedBytes     uint64  `json:"usedBytes"`
 	FreeBytes     uint64  `json:"freeBytes"`
 	ReservedBytes uint64  `json:"reservedBytes"`
 	UsedPercent   float64 `json:"usedPercent"`
-	Error         string  `json:"error,omitempty"`
 }
 
 // HeartbeatEvent is the entire heartbeat payload: the same identity pair the
