@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"log-tailer-go/config"
-	"log-tailer-go/metrics/network"
+	"log-tailer-go/resources/network"
 	"log-tailer-go/model"
 )
 

@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"log-tailer-go/config"
-	"log-tailer-go/metrics/cpu"
-	"log-tailer-go/metrics/disk"
-	"log-tailer-go/metrics/load"
-	"log-tailer-go/metrics/memory"
-	"log-tailer-go/metrics/network"
-	"log-tailer-go/metrics/uptime"
+	"log-tailer-go/resources/cpu"
+	"log-tailer-go/storage/disk"
+	"log-tailer-go/resources/load"
+	"log-tailer-go/resources/memory"
+	"log-tailer-go/resources/network"
+	"log-tailer-go/resources/uptime"
 	"log-tailer-go/model"
 )
 
