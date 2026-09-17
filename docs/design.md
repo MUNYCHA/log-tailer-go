@@ -15,8 +15,8 @@ Tick a box when that item is built, tested and merged to `dev`.
 | 1 | Config | Replace `metrics` block with `resources` + `storage` blocks | [x] |
 | 2 | Layout | Move `metrics/*` into `resources/` and `storage/` | [x] |
 | 3 | Resources | Separate Resources event with grouped shape | [x] |
-| 4 | Resources — uptime | Optional (no longer skips the event) | [ ] |
-| 5 | Resources — cpu | Add `count` | [ ] |
+| 4 | Resources — uptime | Optional (no longer skips the event) | [x] |
+| 5 | Resources — cpu | Add `count` | [x] |
 | 6 | Resources — memory | Add `usedBytes`, `usedPercent` | [ ] |
 | 7 | Resources — memory | Estimate when `MemAvailable` is missing + `estimated` flag | [ ] |
 | 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | [ ] |
