@@ -11,10 +11,11 @@ type LogEvent struct {
 	Message    string `json:"message"`
 }
 
-// MetricsEvent is one snapshot of a server. Every field sourced from /proc is
-// a pointer so a failed read is omitted from the JSON rather than sent as a
-// zero — an absent field is "unknown", where 0 would read as a real measurement.
-type MetricsEvent struct {
+// ResourcesEvent is one snapshot of a server's uptime, cpu, memory, swap and
+// network. Each group is a pointer so a group that cannot be read is omitted
+// from the JSON as a whole rather than sent as zeros — an absent group is
+// "unknown", where 0 would read as a real measurement.
+type ResourcesEvent struct {
 	SystemID      string `json:"systemId"`
 	SystemName    string `json:"systemName"`
 	ServerName    string `json:"serverName"`
@@ -22,27 +23,53 @@ type MetricsEvent struct {
 	Timestamp     string `json:"timestamp"`
 	UptimeSeconds int64  `json:"uptimeSeconds"`
 
-	// /proc/loadavg — omitted as a group if the file cannot be read or parsed
+	CPU     *CPUGroup     `json:"cpu,omitempty"`
+	Memory  *MemoryGroup  `json:"memory,omitempty"`
+	Swap    *SwapGroup    `json:"swap,omitempty"`
+	Network *NetworkGroup `json:"network,omitempty"`
+}
+
+// CPUGroup comes from two files that fail independently, so each part is a
+// pointer: the group is omitted only when neither can be read.
+type CPUGroup struct {
+	// Mean busy percentage over the interval since the previous tick, from
+	// /proc/stat. Omitted on the first tick after start (and after a
+	// supervised restart), when there is no previous sample to difference.
+	UsedPercent *float64 `json:"usedPercent,omitempty"`
+
+	// /proc/loadavg — omitted as a set if the file cannot be read or parsed
 	Load1  *float64 `json:"load1,omitempty"`
 	Load5  *float64 `json:"load5,omitempty"`
 	Load15 *float64 `json:"load15,omitempty"`
+}
 
-	// /proc/meminfo — omitted as a group. Values are bytes; the file is kB.
-	MemTotalBytes     *uint64 `json:"memTotalBytes,omitempty"`
-	MemAvailableBytes *uint64 `json:"memAvailableBytes,omitempty"`
-	SwapTotalBytes    *uint64 `json:"swapTotalBytes,omitempty"`
-	SwapUsedBytes     *uint64 `json:"swapUsedBytes,omitempty"`
+// MemoryGroup is RAM from /proc/meminfo, in bytes (the file is kB).
+type MemoryGroup struct {
+	TotalBytes     uint64 `json:"totalBytes"`
+	AvailableBytes uint64 `json:"availableBytes"`
+}
 
-	// Mean CPU busy percentage over the interval since the previous tick.
-	// Omitted on the first tick after start (and after a supervised restart),
-	// when there is no previous /proc/stat sample to difference against.
-	CPUPercent *float64 `json:"cpuPercent,omitempty"`
+// SwapGroup is swap from /proc/meminfo, in bytes. Used is SwapTotal - SwapFree.
+type SwapGroup struct {
+	TotalBytes uint64 `json:"totalBytes"`
+	UsedBytes  uint64 `json:"usedBytes"`
+}
 
-	// Mean download (rx) and upload (tx) rate since the previous tick, summed
-	// over physical interfaces from /proc/net/dev. Omitted as a pair, and on
-	// the first tick for the same reason as CPUPercent.
-	NetRxBytesPerSec *float64 `json:"netRxBytesPerSec,omitempty"`
-	NetTxBytesPerSec *float64 `json:"netTxBytesPerSec,omitempty"`
+// NetworkGroup is the mean download (rx) and upload (tx) rate since the
+// previous tick, summed over physical interfaces from /proc/net/dev. Omitted
+// on the first tick for the same reason as CPUGroup.UsedPercent.
+type NetworkGroup struct {
+	RxBytesPerSec float64 `json:"rxBytesPerSec"`
+	TxBytesPerSec float64 `json:"txBytesPerSec"`
+}
+
+// StorageEvent is one snapshot of disk usage for the configured mounts.
+type StorageEvent struct {
+	SystemID   string `json:"systemId"`
+	SystemName string `json:"systemName"`
+	ServerName string `json:"serverName"`
+	ServerIP   string `json:"serverIp"`
+	Timestamp  string `json:"timestamp"`
 
 	Mounts []MountUsage `json:"mounts"`
 }

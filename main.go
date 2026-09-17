@@ -13,6 +13,8 @@ import (
 	"log-tailer-go/heartbeat"
 	"log-tailer-go/logs"
 	"log-tailer-go/redis"
+	"log-tailer-go/resources"
+	"log-tailer-go/storage"
 )
 
 const (
@@ -37,6 +39,24 @@ func main() {
 	if !cfg.LogTailer.Enabled && !cfg.Resources.Enabled && !cfg.Storage.Enabled && !cfg.Heartbeat.IsEnabled() {
 		slog.Error("No component is enabled in config, nothing to do")
 		os.Exit(1)
+	}
+
+	var resourcesInterval time.Duration
+	if cfg.Resources.Enabled {
+		resourcesInterval, err = time.ParseDuration(cfg.Resources.Interval)
+		if err != nil {
+			slog.Error("Failed to parse resources.interval", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	var storageInterval time.Duration
+	if cfg.Storage.Enabled {
+		storageInterval, err = time.ParseDuration(cfg.Storage.Interval)
+		if err != nil {
+			slog.Error("Failed to parse storage.interval", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	var heartbeatInterval time.Duration
@@ -68,6 +88,20 @@ func main() {
 				logs.New(f.Path, f.Channel, cfg.Identity, publisher).Run(ctx)
 			})
 		}
+	}
+
+	if cfg.Resources.Enabled {
+		runSupervised(ctx, &wg, "resources", func(ctx context.Context) {
+			resources.New(cfg.Resources.Channel, cfg.Identity, resourcesInterval, publisher).Run(ctx)
+		})
+	}
+
+	// Supervised separately from resources on purpose: a stat stuck on a dead
+	// mount only delays the storage event, never cpu or memory
+	if cfg.Storage.Enabled {
+		runSupervised(ctx, &wg, "storage", func(ctx context.Context) {
+			storage.New(cfg.Storage.Mounts, cfg.Storage.Channel, cfg.Identity, storageInterval, publisher).Run(ctx)
+		})
 	}
 
 	// Supervised separately from storage on purpose: a collector wedged on a

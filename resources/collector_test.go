@@ -1,4 +1,4 @@
-package metrics
+package resources
 
 import (
 	"context"
@@ -8,14 +8,14 @@ import (
 	"time"
 
 	"log-tailer-go/config"
-	"log-tailer-go/resources/network"
 	"log-tailer-go/model"
+	"log-tailer-go/resources/network"
 )
 
 // fakePublisher records published payloads. No Redis involved.
 type fakePublisher struct {
 	mu    sync.Mutex
-	sent  []model.MetricsEvent
+	sent  []model.ResourcesEvent
 	chans []string
 }
 
@@ -23,7 +23,7 @@ func (p *fakePublisher) PublishBatch(_ context.Context, channel string, payloads
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, payload := range payloads {
-		var ev model.MetricsEvent
+		var ev model.ResourcesEvent
 		if err := json.Unmarshal(payload, &ev); err != nil {
 			continue
 		}
@@ -33,19 +33,25 @@ func (p *fakePublisher) PublishBatch(_ context.Context, channel string, payloads
 	return len(payloads)
 }
 
-func (p *fakePublisher) events() []model.MetricsEvent {
+func (p *fakePublisher) events() []model.ResourcesEvent {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]model.MetricsEvent(nil), p.sent...)
+	return append([]model.ResourcesEvent(nil), p.sent...)
 }
 
-func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
+func (p *fakePublisher) channels() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.chans...)
+}
+
+func TestCollector_PublishesIdentityAndUptime(t *testing.T) {
 	pub := &fakePublisher{}
 	identity := config.IdentityConfig{
 		System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
 		Server: config.ServerIdentity{Name: "server-1", IP: "10.0.0.5"},
 	}
-	c := New([]string{"/", "/this/path/does/not/exist/hopefully"}, "metrics-channel", identity, 10*time.Millisecond, pub)
+	c := New("resources-channel", identity, 10*time.Millisecond, pub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -53,7 +59,10 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 
 	events := pub.events()
 	if len(events) == 0 {
-		t.Fatal("expected at least one metrics event to be published")
+		t.Fatal("expected at least one resources event to be published")
+	}
+	if ch := pub.channels()[0]; ch != "resources-channel" {
+		t.Fatalf("expected channel 'resources-channel', got %q", ch)
 	}
 
 	ev := events[0]
@@ -72,23 +81,11 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	if ev.UptimeSeconds <= 0 {
 		t.Fatalf("expected a positive uptimeSeconds, got %d", ev.UptimeSeconds)
 	}
-	if len(ev.Mounts) != 2 {
-		t.Fatalf("expected 2 mounts in event, got %d", len(ev.Mounts))
-	}
-	if ev.Mounts[0].Error != "" || ev.Mounts[0].TotalBytes == 0 {
-		t.Fatalf("expected / to have a reading and no error, got %+v", ev.Mounts[0])
-	}
-	if ev.Mounts[1].Error == "" {
-		t.Fatal("expected the bad mount path to have an error set")
-	}
-	if ev.Mounts[1].TotalBytes != 0 {
-		t.Fatalf("expected zero TotalBytes on error, got %d", ev.Mounts[1].TotalBytes)
-	}
 }
 
 func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
 	pub := &fakePublisher{}
-	c := New([]string{"/"}, "metrics-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+	c := New("resources-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -98,18 +95,21 @@ func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
 	if len(events) < 2 {
 		t.Fatalf("expected at least 2 events to compare, got %d", len(events))
 	}
-	if events[0].CPUPercent != nil {
-		t.Fatalf("expected cpuPercent omitted on the first tick, got %f", *events[0].CPUPercent)
+	if events[0].CPU == nil {
+		t.Fatal("expected the cpu group on the first tick (load is available)")
 	}
-	if events[1].CPUPercent == nil {
-		t.Fatal("expected cpuPercent on the second tick, got nil")
+	if events[0].CPU.UsedPercent != nil {
+		t.Fatalf("expected cpu.usedPercent omitted on the first tick, got %f", *events[0].CPU.UsedPercent)
 	}
-	if pct := *events[1].CPUPercent; pct < 0 || pct > 100 {
-		t.Fatalf("expected cpuPercent in [0,100], got %f", pct)
+	if events[1].CPU == nil || events[1].CPU.UsedPercent == nil {
+		t.Fatal("expected cpu.usedPercent on the second tick, got nil")
+	}
+	if pct := *events[1].CPU.UsedPercent; pct < 0 || pct > 100 {
+		t.Fatalf("expected cpu.usedPercent in [0,100], got %f", pct)
 	}
 }
 
-func TestCollector_OmitsNetIOOnFirstTickOnly(t *testing.T) {
+func TestCollector_OmitsNetworkOnFirstTickOnly(t *testing.T) {
 	hasPhysical := false
 	if data, err := network.Read(); err == nil {
 		if sample, err := network.Parse(data); err == nil {
@@ -122,7 +122,7 @@ func TestCollector_OmitsNetIOOnFirstTickOnly(t *testing.T) {
 	}
 
 	pub := &fakePublisher{}
-	c := New([]string{"/"}, "metrics-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+	c := New("resources-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -132,20 +132,20 @@ func TestCollector_OmitsNetIOOnFirstTickOnly(t *testing.T) {
 	if len(events) < 2 {
 		t.Fatalf("expected at least 2 events to compare, got %d", len(events))
 	}
-	if events[0].NetRxBytesPerSec != nil || events[0].NetTxBytesPerSec != nil {
-		t.Fatal("expected network rates omitted on the first tick")
+	if events[0].Network != nil {
+		t.Fatal("expected the network group omitted on the first tick")
 	}
-	if events[1].NetRxBytesPerSec == nil || events[1].NetTxBytesPerSec == nil {
-		t.Fatal("expected network rates on the second tick, got nil")
+	if events[1].Network == nil {
+		t.Fatal("expected the network group on the second tick, got nil")
 	}
-	if *events[1].NetRxBytesPerSec < 0 || *events[1].NetTxBytesPerSec < 0 {
-		t.Fatalf("expected non-negative rates, got rx %f tx %f", *events[1].NetRxBytesPerSec, *events[1].NetTxBytesPerSec)
+	if events[1].Network.RxBytesPerSec < 0 || events[1].Network.TxBytesPerSec < 0 {
+		t.Fatalf("expected non-negative rates, got rx %f tx %f", events[1].Network.RxBytesPerSec, events[1].Network.TxBytesPerSec)
 	}
 }
 
-func TestCollector_PublishesLoadAndMemoryFromRealProc(t *testing.T) {
+func TestCollector_PublishesLoadMemoryAndSwapFromRealProc(t *testing.T) {
 	pub := &fakePublisher{}
-	c := New([]string{"/"}, "metrics-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
+	c := New("resources-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
@@ -153,26 +153,43 @@ func TestCollector_PublishesLoadAndMemoryFromRealProc(t *testing.T) {
 
 	events := pub.events()
 	if len(events) == 0 {
-		t.Fatal("expected at least one metrics event")
+		t.Fatal("expected at least one resources event")
 	}
 
 	ev := events[0]
-	if ev.Load1 == nil || ev.Load5 == nil || ev.Load15 == nil {
+	if ev.CPU == nil || ev.CPU.Load1 == nil || ev.CPU.Load5 == nil || ev.CPU.Load15 == nil {
 		t.Fatal("expected all three load figures to be present")
 	}
-	if ev.MemTotalBytes == nil || ev.MemAvailableBytes == nil {
-		t.Fatal("expected memory figures to be present")
+	if ev.Memory == nil {
+		t.Fatal("expected the memory group to be present")
 	}
-	if *ev.MemTotalBytes == 0 {
-		t.Fatal("expected a non-zero memTotalBytes")
+	if ev.Memory.TotalBytes == 0 {
+		t.Fatal("expected a non-zero memory.totalBytes")
 	}
-	if *ev.MemAvailableBytes > *ev.MemTotalBytes {
-		t.Fatalf("expected memAvailable <= memTotal, got %d > %d", *ev.MemAvailableBytes, *ev.MemTotalBytes)
+	if ev.Memory.AvailableBytes > ev.Memory.TotalBytes {
+		t.Fatalf("expected memory available <= total, got %d > %d", ev.Memory.AvailableBytes, ev.Memory.TotalBytes)
 	}
-	if ev.SwapTotalBytes == nil || ev.SwapUsedBytes == nil {
-		t.Fatal("expected swap figures to be present")
+	if ev.Swap == nil {
+		t.Fatal("expected the swap group to be present")
 	}
-	if *ev.SwapUsedBytes > *ev.SwapTotalBytes {
-		t.Fatalf("expected swapUsed <= swapTotal, got %d > %d", *ev.SwapUsedBytes, *ev.SwapTotalBytes)
+	if ev.Swap.UsedBytes > ev.Swap.TotalBytes {
+		t.Fatalf("expected swap used <= total, got %d > %d", ev.Swap.UsedBytes, ev.Swap.TotalBytes)
+	}
+}
+
+// Groups that can't be read must be absent from the JSON, not sent as zeros
+func TestResourcesEvent_OmitsMissingGroupsInJSON(t *testing.T) {
+	payload, err := json.Marshal(model.ResourcesEvent{UptimeSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"cpu", "memory", "swap", "network"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("expected %q omitted when nil, got %s", key, payload)
+		}
 	}
 }

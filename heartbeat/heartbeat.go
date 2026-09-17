@@ -2,7 +2,7 @@
 //
 // This is how a server is judged up, so it is deliberately the dumbest
 // component in the agent: it reads no files, stats no mounts, and shares no
-// state with the metrics collector. If metrics collection wedges on a stuck
+// state with the storage collector. If storage collection wedges on a stuck
 // mount, the beat keeps going. A beat that can stop for any reason other than
 // the agent being dead is worse than no beat at all.
 package heartbeat
