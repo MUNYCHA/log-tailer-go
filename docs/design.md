@@ -22,9 +22,9 @@ Tick a box when that item is built, tested and merged to `dev`.
 | 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | [x] |
 | 9 | Resources — network | Move into `network` group | [x] |
 | 10 | Storage | Separate Storage event | [x] |
-| 11 | Storage — mount | Use `f_frsize` instead of `f_bsize` | [ ] |
-| 12 | Storage — mount | `usedPercent` with df formula | [ ] |
-| 13 | Storage — mount | Add `reservedBytes` | [ ] |
+| 11 | Storage — mount | Use `f_frsize` instead of `f_bsize` | [x] |
+| 12 | Storage — mount | `usedPercent` with df formula | [x] |
+| 13 | Storage — mount | Add `reservedBytes` | [x] |
 | 14 | Storage — mount | Add `device`, `fsType` from mount table | [ ] |
 | 15 | Storage — mount | Network paths reported as not supported | [ ] |
 | 16 | Storage — mount | `mounts` optional in config | [ ] |
