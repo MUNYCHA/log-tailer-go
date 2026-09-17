@@ -206,7 +206,7 @@ When `storage.enabled` is `true`, the server's total local storage and the disk 
     "usedBytes": 53502541824,
     "freeBytes": 160709131878,
     "reservedBytes": 11274109338,
-    "usedPercent": 24.97,
+    "usedPercent": 24.98,
     "partial": false
   },
   "mounts": [
