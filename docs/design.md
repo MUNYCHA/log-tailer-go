@@ -12,16 +12,16 @@ Tick a box when that item is built, tested and merged to `dev`.
 
 | # | Feature | Item | Done |
 |---|---|---|---|
-| 1 | Config | Replace `metrics` block with `resources` + `storage` blocks | [ ] |
-| 2 | Layout | Move `metrics/*` into `resources/` and `storage/` | [ ] |
-| 3 | Resources | Separate Resources event with grouped shape | [ ] |
+| 1 | Config | Replace `metrics` block with `resources` + `storage` blocks | [x] |
+| 2 | Layout | Move `metrics/*` into `resources/` and `storage/` | [x] |
+| 3 | Resources | Separate Resources event with grouped shape | [x] |
 | 4 | Resources — uptime | Optional (no longer skips the event) | [ ] |
 | 5 | Resources — cpu | Add `count` | [ ] |
 | 6 | Resources — memory | Add `usedBytes`, `usedPercent` | [ ] |
 | 7 | Resources — memory | Estimate when `MemAvailable` is missing + `estimated` flag | [ ] |
 | 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | [ ] |
-| 9 | Resources — network | Move into `network` group | [ ] |
-| 10 | Storage | Separate Storage event | [ ] |
+| 9 | Resources — network | Move into `network` group | [x] |
+| 10 | Storage | Separate Storage event | [x] |
 | 11 | Storage — mount | Use `f_frsize` instead of `f_bsize` | [ ] |
 | 12 | Storage — mount | `usedPercent` with df formula | [ ] |
 | 13 | Storage — mount | Add `reservedBytes` | [ ] |
