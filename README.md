@@ -24,9 +24,9 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 ## Requirements
 
 - **Linux only** — metrics are read from `/proc`, `/sys` and `statfs`; the agent does not build on Windows, macOS or BSD
-- **Kernel 3.14 or newer** for a complete metrics report
-  - 3.2 – 3.13: runs, but the memory fields are omitted (`MemAvailable` was added to `/proc/meminfo` in 3.14)
-  - RHEL/CentOS 7 (3.10) backports `MemAvailable`, so memory is reported there too
+- **Kernel 3.14 or newer** for exact values in every field
+  - 3.2 – 3.13: runs, but memory is estimated and marked `memory.estimated: true` (`MemAvailable` was added to `/proc/meminfo` in 3.14)
+  - RHEL/CentOS 7 (3.10) backports `MemAvailable`, so memory is exact there too
   - Below 3.2: not supported by the Go runtime
 - **Tested on kernel 6.6.** Older kernels are covered by the documented, append-only `/proc` formats, not by direct testing
 - **Go 1.25+** to build (`go.mod`); the resulting binary has no runtime dependencies
@@ -60,16 +60,18 @@ log-tailer-go/
 │   ├── cpu/             — /proc/stat → cpu.count; last tick vs this tick → cpu.usedPercent
 │   └── network/         — /proc/net/dev, physical NICs only, last tick vs this tick → rx/tx bytes/sec
 ├── storage/
-│   ├── collector.go     — every interval: runs read → parse → calculate for each mount,
-│   │                      builds one storage event, publishes it
+│   ├── collector.go     — every interval: reads the mount table, builds the server total
+│   │                      and each configured mount, publishes one storage event
 │   ├── collector_test.go
 │   ├── mounts/          — /proc/self/mounts → device, fsType, local or network per path; unique local filesystems
 │   └── disk/            — statfs → total/used/free/reserved bytes, used %; server-wide total
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
-└── deploy/
-    └── log-tailer-go.service — systemd unit for production
+├── deploy/
+│   └── log-tailer-go.service — systemd unit for production
+└── docs/
+    └── design.md        — event shapes, calculations and missing-data rules per feature, with progress
 ```
 
 Every metric folder under `resources/` and `storage/` has the same four files, one job each:
@@ -146,7 +148,7 @@ When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, sw
 
 This collector runs independently of `logTailer` and `storage` — each can be enabled on its own.
 
-Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, never sent as a zero: absent means "unknown", where `0` would read as a real measurement of an idle machine. Values are omitted as a group, since a half-parsed file tells you nothing about which line survived:
+Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, never sent as a zero: absent means "unknown", where `0` would read as a real measurement of an idle machine. Values from one file are omitted together, since a half-parsed file tells you nothing about which line survived:
 
 | Source | Values | If the read or parse fails |
 |---|---|---|
@@ -154,7 +156,7 @@ Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, 
 | `/proc/loadavg` | `cpu.load1`, `cpu.load5`, `cpu.load15` | All three omitted, the tick still publishes |
 | `/proc/stat` | `cpu.count`, `cpu.usedPercent` | Both omitted, the tick still publishes |
 | `/proc/loadavg` and `/proc/stat` | the whole `cpu` group | Omitted, the tick still publishes |
-| `/proc/meminfo` unreadable | the whole `memory` and `swap` groups | Both omitted, the tick still publishes |
+| `/proc/meminfo` unreadable, or a value isn't a number | the whole `memory` and `swap` groups | Both omitted, the tick still publishes |
 | `/proc/meminfo` without `MemTotal`, or without both `MemAvailable` and the estimate lines | the whole `memory` group | Omitted, `swap` still publishes |
 | `/proc/meminfo` without `SwapTotal`/`SwapFree` | the whole `swap` group | Omitted, `memory` still publishes |
 | `/proc/net/dev` | the whole `network` group | Omitted, the tick still publishes |
@@ -184,7 +186,7 @@ pct  = 100 * busy / (total_now - total_prev)
 
 `total` excludes the `guest` and `guest_nice` columns. The kernel already counts time spent running VMs inside `user` and `nice`, so adding those columns again would inflate `total` and busy time by the same amount and make `cpu.usedPercent` read too high on a host running VMs (e.g. 70% real busy reported as ~79%). On an ordinary server or inside a VM both columns are `0`, and the result is unchanged.
 
-Because it needs two samples, `cpu.usedPercent` is **omitted on the first tick after startup**, and again on the first tick after a supervised restart (the collector is rebuilt, so the previous sample is gone). It's also omitted if the counters move backwards, which is what a reboot between ticks looks like. A short spike inside a 1-minute interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
+Because it needs two samples, `cpu.usedPercent` is **omitted on the first tick after startup**, and again on the first tick after a supervised restart (the collector is rebuilt, so the previous sample is gone). It's also omitted if the counters move backwards, which is what a reboot between ticks looks like. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
 
 `network.rxBytesPerSec` (download) and `network.txBytesPerSec` (upload) are the **mean rate in bytes per second over the interval**, differencing two `/proc/net/dev` samples and dividing by the wall-clock time between them. Multiply by 8 for bits per second. They are summed over **physical interfaces only** — those with a `/sys/class/net/<iface>/device` link — so loopback, Docker bridges, veths and tunnels are excluded; counting them would double count traffic that also crosses the NIC. An interface that appears between two ticks is left out of that window, since it has no baseline.
 
@@ -251,7 +253,7 @@ The total measures mounted, usable storage — not the size of the physical disk
 
 #### Mounts
 
-Mounts are reported in config order. A path doesn't have to be a mount point: `/var/log` reports the filesystem it lives on. `device` and `fsType` come from `/proc/self/mounts`, read once per tick — the entry whose mount point is the longest whole-component match for the path. Two paths showing the same `device` share one disk, so filling one fills the other.
+Mounts are reported in config order. A path doesn't have to be a mount point: `/var/log` reports the filesystem it lives on. `device` and `fsType` come from `/proc/self/mounts`, read once per tick — the entry whose mount point is the longest whole-component match for the path. Two paths on the same disk device (for example both `/dev/sda1`) share that disk, so filling one fills the other.
 
 A path is matched as written; symlinks are not resolved, since resolving would touch every component of the path and could block on a dead network mount.
 
@@ -259,12 +261,18 @@ When a path has no reading, it is published with only an `error`, never with zer
 
 | Case | Published |
 |---|---|
-| Path can't be statted (typo, not mounted, permission) | `{ path, error }` |
+| Path can't be statted (doesn't exist, permission denied) | `{ path, error }` |
 | Path is on a network filesystem (`nfs`, `nfs4`, `cifs`, `smb3`, `ceph`, `glusterfs`, `fuse.sshfs`, `9p`) | `{ path, fsType, error: "network filesystem not supported" }` |
 
 A failing path is logged once when it starts failing and once when it becomes readable again, not on every tick, so a typo'd path doesn't flood the journal.
 
-Network paths are **never statted**: `statfs` on a mount whose server is down can block until the server answers, which would hold up the whole storage event. The rest of the mounts still publish normally. If the mount table itself can't be read, paths are statted without `device`, `fsType` or the network check.
+Network paths are **never statted**: `statfs` on a mount whose server is down can block until the server answers, which would hold up the whole storage event. The rest of the mounts still publish normally.
+
+Only network filesystems are refused. Any other configured path is reported, including RAM-backed ones such as a `tmpfs` `/tmp`, even though those are left out of the `server` total.
+
+If the mount table itself can't be read, paths are statted without `device`, `fsType` or the network check, and `server` is omitted.
+
+A path that is an empty mount point with nothing mounted on it reports the filesystem it sits on (usually `/`), exactly as `df` would.
 
 `storage.mounts` may be empty, in which case `mounts` is published as `[]` and `server` is still reported.
 
@@ -389,9 +397,17 @@ The unit fences the service hard:
 - `MemoryMax=64M` + `MemorySwapMax=0` — hard memory ceiling (includes page cache), no swap
 - `CPUQuota=25%` + `Nice=10` — at most a quarter of one core, yields to everything else
 - `ProtectSystem=strict` + `NoNewPrivileges` — entire filesystem is read-only to the process, kernel-enforced
-- `ProtectHome=read-only` + `PrivateTmp` — home directories are inaccessible, `/tmp` is isolated from the rest of the system
+- `ProtectHome=read-only` + `PrivateTmp` — home directories can be read but not written; the service gets its own `/tmp` folder, which still lives on the host's `/tmp` filesystem, so its disk usage matches `df /tmp`
 - `ProtectKernelTunables` + `ProtectControlGroups` + `RestrictSUIDSGID` — no writing to `/proc/sys` or the cgroup hierarchy, can't create setuid/setgid files
 - `Restart=on-failure` + `RestartSec=5` — self-heals indefinitely, including when Redis is down at boot
 - `TimeoutStopSec=20` — bounded shutdown window before systemd force-kills the process
+
+Do **not** add these settings, they hide data the agent reads:
+
+| Setting | What breaks |
+|---|---|
+| `ProcSubset=pid` | hides `/proc/uptime`, `/proc/stat`, `/proc/loadavg`, `/proc/meminfo` and `/proc/net/dev`, so uptime, cpu, memory, swap and network are omitted |
+| `ProtectHome=yes` or `ProtectHome=tmpfs` | a separate `/home` disk disappears from the storage `server` total |
+| `InaccessiblePaths=` or `TemporaryFileSystem=` on a disk path | that disk is hidden from storage or reported as the wrong filesystem |
 
 > No JVM flags needed — Go binaries use only what they need.
