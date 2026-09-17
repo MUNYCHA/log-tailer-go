@@ -8,28 +8,28 @@ in the progress table.
 
 ## Progress
 
-Tick a box when that item is built, tested and merged to `dev`.
+Mark an item ✅ when it is built, tested and merged to `dev`; ⬜ means not done yet.
 
 | # | Feature | Item | Done |
 |---|---|---|---|
-| 1 | Config | Replace `metrics` block with `resources` + `storage` blocks | [x] |
-| 2 | Layout | Move `metrics/*` into `resources/` and `storage/` | [x] |
-| 3 | Resources | Separate Resources event with grouped shape | [x] |
-| 4 | Resources — uptime | Optional (no longer skips the event) | [x] |
-| 5 | Resources — cpu | Add `count` | [x] |
-| 6 | Resources — memory | Add `usedBytes`, `usedPercent` | [x] |
-| 7 | Resources — memory | Estimate when `MemAvailable` is missing + `estimated` flag | [x] |
-| 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | [x] |
-| 9 | Resources — network | Move into `network` group | [x] |
-| 10 | Storage | Separate Storage event | [x] |
-| 11 | Storage — mount | Use `f_frsize` instead of `f_bsize` | [x] |
-| 12 | Storage — mount | `usedPercent` with df formula | [x] |
-| 13 | Storage — mount | Add `reservedBytes` | [x] |
-| 14 | Storage — mount | Add `device`, `fsType` from mount table | [x] |
-| 15 | Storage — mount | Network paths reported as not supported | [x] |
-| 16 | Storage — mount | `mounts` optional in config | [x] |
-| 17 | Storage — server total | `server` group from mount table | [x] |
-| 18 | Storage — server total | `partial` flag | [x] |
+| 1 | Config | Replace `metrics` block with `resources` + `storage` blocks | ✅ |
+| 2 | Layout | Move `metrics/*` into `resources/` and `storage/` | ✅ |
+| 3 | Resources | Separate Resources event with grouped shape | ✅ |
+| 4 | Resources — uptime | Optional (no longer skips the event) | ✅ |
+| 5 | Resources — cpu | Add `count` | ✅ |
+| 6 | Resources — memory | Add `usedBytes`, `usedPercent` | ✅ |
+| 7 | Resources — memory | Estimate when `MemAvailable` is missing + `estimated` flag | ✅ |
+| 8 | Resources — swap | Add `usedPercent`; sent even when memory fails | ✅ |
+| 9 | Resources — network | Move into `network` group | ✅ |
+| 10 | Storage | Separate Storage event | ✅ |
+| 11 | Storage — mount | Use `f_frsize` instead of `f_bsize` | ✅ |
+| 12 | Storage — mount | `usedPercent` with df formula | ✅ |
+| 13 | Storage — mount | Add `reservedBytes` | ✅ |
+| 14 | Storage — mount | Add `device`, `fsType` from mount table | ✅ |
+| 15 | Storage — mount | Network paths reported as not supported | ✅ |
+| 16 | Storage — mount | `mounts` optional in config | ✅ |
+| 17 | Storage — server total | `server` group from mount table | ✅ |
+| 18 | Storage — server total | `partial` flag | ✅ |
 
 ---
 
