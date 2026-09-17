@@ -57,7 +57,7 @@ log-tailer-go/
 │   ├── uptime/          — /proc/uptime → uptimeSeconds
 │   ├── load/            — /proc/loadavg → cpu.load1/5/15
 │   ├── memory/          — /proc/meminfo → memory and swap in bytes
-│   ├── cpu/             — /proc/stat, last tick vs this tick → cpu.usedPercent
+│   ├── cpu/             — /proc/stat → cpu.count; last tick vs this tick → cpu.usedPercent
 │   └── network/         — /proc/net/dev, physical NICs only, last tick vs this tick → rx/tx bytes/sec
 ├── storage/
 │   ├── collector.go     — every interval: runs read → parse → calculate for each mount,
@@ -118,6 +118,7 @@ When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, sw
   "timestamp": "2026-05-28T10:00:00Z",
   "uptimeSeconds": 435600,
   "cpu": {
+    "count": 8,
     "usedPercent": 12.7,
     "load1": 0.52,
     "load5": 0.41,
@@ -144,14 +145,14 @@ Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, 
 
 | Source | Values | If the read or parse fails |
 |---|---|---|
-| `/proc/uptime` | `uptimeSeconds` | **The whole tick is skipped** — no event at all |
+| `/proc/uptime` | `uptimeSeconds` | Omitted, the tick still publishes |
 | `/proc/loadavg` | `cpu.load1`, `cpu.load5`, `cpu.load15` | All three omitted, the tick still publishes |
-| `/proc/stat` | `cpu.usedPercent` | Omitted, the tick still publishes |
+| `/proc/stat` | `cpu.count`, `cpu.usedPercent` | Both omitted, the tick still publishes |
 | `/proc/loadavg` and `/proc/stat` | the whole `cpu` group | Omitted, the tick still publishes |
 | `/proc/meminfo` | the whole `memory` and `swap` groups | Both omitted, the tick still publishes |
 | `/proc/net/dev` | the whole `network` group | Omitted, the tick still publishes |
 
-`uptimeSeconds` is the exception because the consumer discards any message missing it — publishing that tick would only waste a round trip.
+`cpu.count` is the number of online logical CPUs (the `cpu0` … `cpuN` lines of `/proc/stat`, the same figure as `nproc`). Load average is measured against it: `load1` of 4 is a full 4-CPU server but a mostly idle 64-CPU one. Unlike `cpu.usedPercent` it needs no previous sample, so it is present from the first tick.
 
 Memory values are bytes (`/proc/meminfo` reports kB, multiplied by 1024). `memory.availableBytes` is `MemAvailable`, not `MemFree`, so it accounts for reclaimable page cache. `swap.usedBytes` is `SwapTotal - SwapFree`.
 

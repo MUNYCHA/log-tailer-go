@@ -78,8 +78,8 @@ func TestCollector_PublishesIdentityAndUptime(t *testing.T) {
 	if ev.ServerIP != "10.0.0.5" {
 		t.Fatalf("expected serverIp '10.0.0.5', got %q", ev.ServerIP)
 	}
-	if ev.UptimeSeconds <= 0 {
-		t.Fatalf("expected a positive uptimeSeconds, got %d", ev.UptimeSeconds)
+	if ev.UptimeSeconds == nil || *ev.UptimeSeconds <= 0 {
+		t.Fatalf("expected a positive uptimeSeconds, got %v", ev.UptimeSeconds)
 	}
 }
 
@@ -97,6 +97,9 @@ func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
 	}
 	if events[0].CPU == nil {
 		t.Fatal("expected the cpu group on the first tick (load is available)")
+	}
+	if events[0].CPU.Count == nil || *events[0].CPU.Count <= 0 {
+		t.Fatalf("expected cpu.count on the first tick (it needs no baseline), got %v", events[0].CPU.Count)
 	}
 	if events[0].CPU.UsedPercent != nil {
 		t.Fatalf("expected cpu.usedPercent omitted on the first tick, got %f", *events[0].CPU.UsedPercent)
@@ -179,7 +182,7 @@ func TestCollector_PublishesLoadMemoryAndSwapFromRealProc(t *testing.T) {
 
 // Groups that can't be read must be absent from the JSON, not sent as zeros
 func TestResourcesEvent_OmitsMissingGroupsInJSON(t *testing.T) {
-	payload, err := json.Marshal(model.ResourcesEvent{UptimeSeconds: 1})
+	payload, err := json.Marshal(model.ResourcesEvent{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +190,7 @@ func TestResourcesEvent_OmitsMissingGroupsInJSON(t *testing.T) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"cpu", "memory", "swap", "network"} {
+	for _, key := range []string{"uptimeSeconds", "cpu", "memory", "swap", "network"} {
 		if _, ok := raw[key]; ok {
 			t.Fatalf("expected %q omitted when nil, got %s", key, payload)
 		}
