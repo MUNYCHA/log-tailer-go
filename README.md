@@ -68,10 +68,8 @@ log-tailer-go/
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
-├── deploy/
-│   └── log-tailer-go.service — systemd unit for production
-└── docs/
-    └── design.md        — event shapes, calculations and missing-data rules per feature, with progress
+└── deploy/
+    └── log-tailer-go.service — systemd unit for production
 ```
 
 Every metric folder under `resources/` and `storage/` has the same four files, one job each:
