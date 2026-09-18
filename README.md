@@ -107,7 +107,7 @@ Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all 
 
 ### Resources
 
-When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, swap and network is published to `resources.channel` every `resources.interval`:
+When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, swap and network is published to `resources.channel` on startup and then every `resources.interval`:
 
 ```json
 {
@@ -188,7 +188,7 @@ The `network` group follows the same omission rules as `cpu.usedPercent`: absent
 
 ### Storage
 
-When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` every `storage.interval`:
+When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` on startup and then every `storage.interval`:
 
 ```json
 {
@@ -285,7 +285,7 @@ Storage runs as its own component, separate from resources, so a `statfs` stuck 
 
 ### Heartbeat
 
-When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — every `heartbeat.interval`:
+When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — on startup and then every `heartbeat.interval`:
 
 ```json
 { "serverId": "your-server-id" }
@@ -310,6 +310,8 @@ A value the agent cannot read is **left out of the JSON entirely** — never sen
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
 The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+
+Every collector publishes once as soon as it starts and then on its interval, so a restarted agent reports within a second instead of going silent for a whole interval — long enough, on a 30s interval, for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. The startup event is a normal event in every respect; for `resources` it is the baseline tick, so `cpu.usedPercent` and `network` arrive with the second one.
 
 The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 

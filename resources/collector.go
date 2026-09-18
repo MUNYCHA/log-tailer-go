@@ -59,6 +59,13 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	// Collect once immediately, then on the interval, so a restarted agent
+	// reports within a second rather than after a whole interval of silence.
+	// This first event is also the baseline for the two values that are
+	// differences between ticks, so it carries no cpu.usedPercent and no
+	// network — those arrive with the second event, as they always have.
+	c.collectAndPublish(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():

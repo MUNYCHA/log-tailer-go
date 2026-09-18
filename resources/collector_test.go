@@ -195,3 +195,26 @@ func TestResourcesEvent_OmitsMissingGroupsInJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestCollector_PublishesImmediatelyOnStart(t *testing.T) {
+	pub := &fakePublisher{}
+	// An interval far longer than the test: anything published can only be
+	// the collect that runs before the ticker's first tick.
+	c := New("resources-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events()
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one event before the first tick, got %d", len(events))
+	}
+	// It is the baseline tick, so the two differenced values are absent
+	if events[0].CPU != nil && events[0].CPU.UsedPercent != nil {
+		t.Fatal("expected no cpu.usedPercent on the first event, it has no previous tick")
+	}
+	if events[0].Network != nil {
+		t.Fatal("expected no network group on the first event, it has no previous tick")
+	}
+}

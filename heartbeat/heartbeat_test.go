@@ -119,3 +119,16 @@ func TestEmitter_UsesTheConfiguredChannel(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitter_BeatsImmediatelyOnStart(t *testing.T) {
+	pub := &fakePublisher{}
+	// An interval far longer than the test: any beat can only be the one
+	// sent before the ticker's first tick.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	New(identity(), "agent-heartbeat", time.Hour, pub).Run(ctx)
+
+	if pub.count() != 1 {
+		t.Fatalf("expected exactly one beat before the first tick, got %d", pub.count())
+	}
+}

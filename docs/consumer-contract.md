@@ -24,10 +24,13 @@ guaranteed to be there.
    is present. There is no half-filled group.
 6. **Lists are always present**, as `[]` when empty. Never `null`, never
    absent.
-7. **New fields get added over time.** A consumer must ignore keys it does not
+7. **Every collector publishes once at startup**, then on its interval. A
+   consumer sees an event immediately after an agent restart, out of step with
+   the interval it was expecting. It carries no marker saying so.
+8. **New fields get added over time.** A consumer must ignore keys it does not
    recognise rather than reject the event.
 
-Rules 2 and 7 are the two that cause real incidents. The rest are convenience.
+Rules 2 and 8 are the two that cause real incidents. The rest are convenience.
 
 ## Identity
 
@@ -153,6 +156,10 @@ every agent start, config reload and supervised restart.
 `cpu.usedPercent` and the whole `network` group are absent. Both are
 differences between two ticks, and the first tick has nothing to difference
 against. The next event carries them.
+
+The agent publishes this event immediately on startup rather than waiting out
+an interval, so it arrives as soon as the agent is up and the complete one
+follows a full interval later.
 
 Do not alarm on this, and do not backfill it with `0`.
 

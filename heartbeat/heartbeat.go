@@ -57,6 +57,13 @@ func (e *Emitter) Run(ctx context.Context) {
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
 
+	// Beat once immediately, then on the interval. A ticker's first tick
+	// comes only after a full interval, which would leave a restarted agent
+	// looking offline for that long — on a 30s interval, long enough for a
+	// consumer expiring the key at ~3 beats to be most of the way to
+	// declaring the server down.
+	e.publisher.PublishBatch(ctx, e.channel, [][]byte{e.payload})
+
 	for {
 		select {
 		case <-ctx.Done():

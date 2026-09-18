@@ -62,6 +62,10 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	// Collect once immediately, then on the interval. Nothing here is
+	// differenced between ticks, so this first event is complete.
+	c.collectAndPublish(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
