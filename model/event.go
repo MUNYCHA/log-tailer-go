@@ -96,6 +96,11 @@ type StorageEvent struct {
 type ServerStorage struct {
 	DiskUsage
 	Partial bool `json:"partial"`
+
+	// Mount points left out of the totals because they could not be read,
+	// sorted, so a partial event says which filesystems are missing instead
+	// of leaving that only in the agent's log. Empty when Partial is false.
+	MissingPaths []string `json:"missingPaths,omitempty"`
 }
 
 // MountUsage is one configured path: the filesystem it lives on and its usage.

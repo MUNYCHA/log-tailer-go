@@ -242,10 +242,24 @@ Values come from `statfs` and match `df -B1` column for column:
 | Case | Published |
 |---|---|
 | Every local filesystem read | `server` with `partial: false` |
-| Some local filesystem can't be statted | `server` summed without it, `partial: true` |
+| Some local filesystem can't be statted | `server` summed without it, `partial: true` and `missingPaths` |
 | None can be read, or no mount table | `server` omitted |
 
-`partial: true` means the total is smaller than the server really has. A failure is logged once when it starts and once when it clears.
+`partial: true` means the total is smaller than the server really has, and `missingPaths` names the mount points left out, sorted:
+
+```json
+"server": {
+  "totalBytes": 214748364800,
+  "usedBytes": 52428800000,
+  "freeBytes": 151582326374,
+  "reservedBytes": 10737238426,
+  "usedPercent": 25.7,
+  "partial": true,
+  "missingPaths": ["/mnt/data"]
+}
+```
+
+A consumer can then say which filesystem is absent without reading the agent's log, and can tell a missing filesystem apart from storage that really shrank. `missingPaths` is omitted entirely when `partial` is false. The failure is also logged, once when it starts and once when it clears.
 
 The total measures mounted, usable storage — not the size of the physical disks: unmounted partitions, swap partitions and unallocated LVM space are not counted. On ext4 and xfs (with or without LVM or mdadm) it equals the sum of `df` for each disk. btrfs figures are the kernel's own estimate, as in `df`. A filesystem type outside the list above is not counted. Network filesystems are never touched, so the total can't block on a dead remote server.
 
