@@ -18,7 +18,7 @@ guaranteed to be there.
    idle one, and an unreachable disk as an empty one.
 3. **An event never fails as a whole.** One unreadable file costs that one
    group; everything else in the event still publishes.
-4. **Identity and `timestamp` are always present** on every event — see
+4. **`serverId` and `timestamp` are always present** on every event — see
    [Identity](#identity).
 5. **Groups are all-or-nothing.** If a group is present, every field inside it
    is present. There is no half-filled group.
@@ -31,25 +31,27 @@ Rules 2 and 7 are the two that cause real incidents. The rest are convenience.
 
 ## Identity
 
-Every `logs`, `resources` and `storage` event opens with the same five fields,
+Every `logs`, `resources` and `storage` event opens with the same two fields,
 in the same order, always present:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-05-28T10:00:00Z"
 }
 ```
 
-`systemId` + `serverName` is the pair that identifies one server; join on it.
-`systemName` and `serverIp` can change and are refreshed from every event, so
-store the latest rather than the first. `timestamp` is RFC 3339, always UTC,
-and is when the agent built the event, not when it was received.
+`serverId` identifies exactly one server and is the only thing to join on. It
+is an opaque string — treat it as such rather than parsing it, since its format
+is the operator's choice and can differ between fleets. Anything else about the
+server (hostname, address, which system it belongs to) is the consumer's to
+hold, looked up from this id; the agent deliberately does not copy it onto
+every event, where it would be a duplicate that goes stale.
 
-`heartbeat` is the exception and carries only `systemId` and `serverName`.
+`timestamp` is RFC 3339, always UTC, and is when the agent built the event, not
+when it was received.
+
+`heartbeat` carries only `serverId`.
 
 ## logs
 
@@ -57,10 +59,7 @@ One event per log line. Fixed shape — every field is always present.
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "path": "/var/log/app/app.log",
   "channel": "your-channel-1",
   "timestamp": "2026-05-28T10:00:00Z",
@@ -77,13 +76,12 @@ multi-line stack traces should not assume one event is one line.
 
 ## heartbeat
 
-Fixed shape, both fields always present.
-
 ```json
-{ "systemId": "your-system-id", "serverName": "your-server-name" }
+{ "serverId": "your-server-id" }
 ```
 
-No degraded form. The beat carries no measurements, reads no files and shares
+Fixed shape, the one field always present. No degraded form. The beat carries
+no measurements, reads no files and shares
 no state with the other collectors, so there is nothing in it that can fail
 independently. If a beat arrives, the agent is alive.
 
@@ -98,10 +96,7 @@ One event per interval. Everything below the identity fields is optional.
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:44:50Z",
   "uptimeSeconds": 7782,
   "cpu": {
@@ -141,10 +136,7 @@ every agent start, config reload and supervised restart.
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:44:50Z",
   "uptimeSeconds": 7782,
   "cpu": {
@@ -171,10 +163,7 @@ but everything else can:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:44:50Z",
   "uptimeSeconds": 7782,
   "cpu": { "count": 24, "usedPercent": 0.28 },
@@ -188,10 +177,7 @@ The worst case, where nothing at all could be read, is still a valid event:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:44:50Z"
 }
 ```
@@ -225,10 +211,7 @@ mount.
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:24:43Z",
   "server": {
     "totalBytes": 1081233945600,
@@ -269,10 +252,7 @@ When a local filesystem cannot be read it is dropped from the sum,
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:30:00Z",
   "server": {
     "totalBytes": 214748364800,
@@ -321,10 +301,7 @@ statted, so an unreachable NFS server cannot delay the event.
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-09-18T04:30:00Z",
   "mounts": []
 }
@@ -375,7 +352,7 @@ usedPercent declared as a float          → absent becomes 0.0 → a busy CPU
 
 So: **every optional scalar needs a type that can hold "no value"** — nullable,
 boxed, `Option`, or a sentinel you check explicitly. Use a plain primitive only
-for the fields listed as always present: the identity fields, `timestamp`,
+for the fields listed as always present: `serverId`, `timestamp`,
 `partial`, `path`, and the numbers *inside* a group, which are guaranteed
 whenever the group itself is there.
 
@@ -396,7 +373,7 @@ Pub/Sub has **no persistence and no delivery guarantee**. A message published
 while no subscriber is connected is discarded, not queued. A consumer that
 reconnects has no way to fetch what it missed, so gaps are normal and the
 consumer must not assume an unbroken series. Every event carries its own
-`timestamp` and identity for exactly that reason: they are independent
+`serverId` and `timestamp` for exactly that reason: they are independent
 snapshots, not a stream that has to be replayed in order.
 
 Publishes are fire-and-forget. The agent logs a failure and drops the message;

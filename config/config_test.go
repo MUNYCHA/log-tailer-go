@@ -10,8 +10,7 @@ func validBase() config.AppConfig {
 	return config.AppConfig{
 		Redis: config.RedisConfig{Addr: "127.0.0.1:6379"},
 		Identity: config.IdentityConfig{
-			System: config.SystemIdentity{ID: "sys", Name: "sys-name"},
-			Server: config.ServerIdentity{Name: "server-name"},
+			ServerID: "server-name",
 		},
 	}
 }

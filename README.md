@@ -91,10 +91,7 @@ Each log line is published as a JSON object:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "path": "/var/log/app/app.log",
   "channel": "your-channel-1",
   "timestamp": "2026-05-28T10:00:00Z",
@@ -102,7 +99,7 @@ Each log line is published as a JSON object:
 }
 ```
 
-Log, resources and storage events all open with the same four identity fields in the same order, so a consumer extracts identity the same way on every channel. `systemId` is the stable key to group or join on — it never changes for a given system, while `systemName` and `serverIp` may change and are refreshed from every event. The heartbeat is the exception: it carries only `systemId` and `serverName`, the pair that identifies a server, and nothing else.
+Every event opens with `serverId`, the id of the server it came from, so a consumer extracts identity the same way on every channel and joins on one field. It is the only identity an event carries: a hostname, address or the system a server belongs to is looked up from that id on the consumer side, rather than copied onto every event where it would go stale. The heartbeat carries `serverId` and nothing else.
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
 
@@ -114,10 +111,7 @@ When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, sw
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-05-28T10:00:00Z",
   "uptimeSeconds": 435600,
   "cpu": {
@@ -198,10 +192,7 @@ When `storage.enabled` is `true`, the server's total local storage and the disk 
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-05-28T10:00:00Z",
   "server": {
     "totalBytes": 225485783040,
@@ -297,10 +288,10 @@ Storage runs as its own component, separate from resources, so a `statfs` stuck 
 When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — every `heartbeat.interval`:
 
 ```json
-{ "systemId": "your-system-id", "serverName": "your-server-name" }
+{ "serverId": "your-server-id" }
 ```
 
-That pair is the same identity the live metrics key is built from, so a beat maps to exactly one server. Because every beat names its own sender, one channel carries the beats of every server in a fleet and the consumer tells them apart from the payload — a per-server channel is supported but not needed for that. It is JSON rather than a bare id so a `serverName` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
+That is the same identity the live metrics key is built from, so a beat maps to exactly one server. Because every beat names its own sender, one channel carries the beats of every server in a fleet and the consumer tells them apart from the payload — a per-server channel is supported but not needed for that. It is JSON rather than a bare id so a `serverId` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
 
 The heartbeat is deliberately the dumbest component in the agent: it reads no files, stats no mounts and shares no state with the resources or storage collectors, running on its own goroutine and its own ticker. If storage collection wedges on a stuck mount, the beat keeps going — a beat that can stop for any reason other than the agent being dead is worse than no beat at all. Publishes are fire and forget: a failure is logged (throttled) and dropped, never retried, never allowed to delay the next beat.
 
@@ -318,7 +309,7 @@ A value the agent cannot read is **left out of the JSON entirely** — never sen
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
-The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr`, `identity.system.id`, `identity.system.name` and `identity.server.name` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. `identity.server.ip` is optional and publishes as an empty string if omitted. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
 
 The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
@@ -335,10 +326,7 @@ cp config/config.example.yaml config/config.yaml
 | `redis.addr` | Redis address (`host:port`) |
 | `redis.password` | Redis password (empty for none) |
 | `redis.db` | Redis database number (Pub/Sub ignores it; kept for client completeness) |
-| `identity.system.id` | Unique system identifier (stable; published in every event as `systemId`) |
-| `identity.system.name` | System display name (published in every event as `systemName`) |
-| `identity.server.name` | Server hostname (published in every event as `serverName`) |
-| `identity.server.ip` | Server IP address (published in every event as `serverIp`) |
+| `identity.serverId` | Unique server identifier, any non-empty string (stable; published in every event as `serverId`) |
 | `logTailer.enabled` | Enable or disable the tailer |
 | `logTailer.files` | List of `{ path, channel }` entries to tail |
 | `resources.enabled` | Enable or disable the resources collector |

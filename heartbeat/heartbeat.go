@@ -37,8 +37,7 @@ func New(identity config.IdentityConfig, channel string, interval time.Duration,
 	// The payload never changes, and a struct of two strings cannot fail to
 	// marshal, so it is built once here — a tick then does nothing but publish
 	payload, _ := json.Marshal(model.HeartbeatEvent{
-		SystemID:   identity.System.ID,
-		ServerName: identity.Server.Name,
+		ServerID: identity.ServerID,
 	})
 
 	return &Emitter{

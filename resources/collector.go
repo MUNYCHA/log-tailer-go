@@ -71,10 +71,7 @@ func (c *Collector) Run(ctx context.Context) {
 
 func (c *Collector) collectAndPublish(ctx context.Context) {
 	event := model.ResourcesEvent{
-		SystemID:      c.identity.System.ID,
-		SystemName:    c.identity.System.Name,
-		ServerName:    c.identity.Server.Name,
-		ServerIP:      c.identity.Server.IP,
+		ServerID:      c.identity.ServerID,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 		UptimeSeconds: readUptime(),
 	}
