@@ -300,13 +300,13 @@ func TestMountUsage_FailureLoggedOncePerState(t *testing.T) {
 	}
 }
 
-func TestCollector_PublishesImmediatelyOnStart(t *testing.T) {
+func TestCollector_PublishesOnStartWithoutWaitingTheInterval(t *testing.T) {
 	pub := &fakePublisher{}
 	// An interval far longer than the test: anything published can only be
 	// the collect that runs before the ticker's first tick.
 	c := New([]string{"/"}, "storage-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), config.StartupDelay+300*time.Millisecond)
 	defer cancel()
 	c.Run(ctx)
 

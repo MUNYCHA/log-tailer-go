@@ -24,12 +24,12 @@ guaranteed to be there.
    is present. There is no half-filled group.
 6. **Lists are always present**, as `[]` when empty. Never `null`, never
    absent.
-7. **Every collector publishes once at startup**, then on its interval. A
-   consumer sees an event immediately after an agent restart, out of step with
-   the interval it was expecting. It carries no marker saying so, and it is a
-   complete event — the rates in it are measured over a one-second warm-up
-   rather than a full interval, so on a long interval the first point covers a
-   much shorter window than the rest.
+7. **Every collector publishes once a second after startup**, then on its own
+   interval. A consumer sees one event per channel right after an agent
+   restart, out of step with the interval it was expecting and carrying no
+   marker saying so. It is a complete event, but its rates are measured over
+   that one second rather than a full interval, so on a long interval the
+   first point covers a much shorter window than the rest.
 8. **New fields get added over time.** A consumer must ignore keys it does not
    recognise rather than reject the event.
 
@@ -139,8 +139,8 @@ can exceed 2³¹, so a 32-bit integer type is not enough. `rxBytesPerSec` and
 
 `cpu.usedPercent` and the `network` group are the two values measured between
 two readings rather than read directly. Normally both are present from the
-first event — the agent takes a baseline reading at startup and waits a
-one-second warm-up before publishing. They drop out only when their source
+first event — the agent takes a baseline reading at startup and
+publishes a second later. They drop out only when their source
 file cannot be read, or when the kernel counters move backwards, which is what
 a reboot between two readings looks like.
 

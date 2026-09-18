@@ -91,19 +91,17 @@ func TestCollector_PublishesCPUPercentFromTheFirstEvent(t *testing.T) {
 	if events[0].CPU.Count == nil || *events[0].CPU.Count <= 0 {
 		t.Fatalf("expected cpu.count on the first event, got %v", events[0].CPU.Count)
 	}
-	// The warm-up reading at startup is the baseline, so the very first
+	// The reading taken during the startup delay is the baseline, so the very first
 	// published event already has a window to measure over
 	if events[0].CPU.UsedPercent == nil {
-		t.Fatal("expected cpu.usedPercent on the first event, the warm-up gives it a baseline")
+		t.Fatal("expected cpu.usedPercent on the first event, the startup reading gives it a baseline")
 	}
-	for i, ev := range events {
-		if ev.CPU == nil || ev.CPU.UsedPercent == nil {
-			t.Fatalf("expected cpu.usedPercent on event %d", i)
-		}
-		if pct := *ev.CPU.UsedPercent; pct < 0 || pct > 100 {
-			t.Fatalf("expected cpu.usedPercent in [0,100] on event %d, got %f", i, pct)
-		}
+	if pct := *events[0].CPU.UsedPercent; pct < 0 || pct > 100 {
+		t.Fatalf("expected cpu.usedPercent in [0,100], got %f", pct)
 	}
+	// Later events are not asserted: at this test's 10ms interval the jiffy
+	// counters can be unchanged between two ticks, which legitimately omits
+	// the field. The startup baseline is what this test is about.
 }
 
 func TestCollector_PublishesNetworkFromTheFirstEvent(t *testing.T) {
@@ -129,9 +127,9 @@ func TestCollector_PublishesNetworkFromTheFirstEvent(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("expected at least one event")
 	}
-	// The warm-up reading at startup is the baseline for the rates too
+	// The reading taken during the startup delay is the baseline for the rates too
 	if events[0].Network == nil {
-		t.Fatal("expected the network group on the first event, the warm-up gives it a baseline")
+		t.Fatal("expected the network group on the first event, the startup reading gives it a baseline")
 	}
 	if events[0].Network.RxBytesPerSec < 0 || events[0].Network.TxBytesPerSec < 0 {
 		t.Fatalf("expected non-negative rates, got rx %f tx %f", events[0].Network.RxBytesPerSec, events[0].Network.TxBytesPerSec)
@@ -204,7 +202,7 @@ func TestCollector_PublishesOnStartWithoutWaitingTheInterval(t *testing.T) {
 	// the collect that runs before the ticker's first tick.
 	c := New("resources-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
 
-	ctx, cancel := context.WithTimeout(context.Background(), warmUp+300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), config.StartupDelay+300*time.Millisecond)
 	defer cancel()
 	c.Run(ctx)
 
@@ -213,27 +211,27 @@ func TestCollector_PublishesOnStartWithoutWaitingTheInterval(t *testing.T) {
 		t.Fatalf("expected exactly one event before the first tick, got %d", len(events))
 	}
 	// Complete despite arriving long before the first interval elapses: the
-	// warm-up reading, not this event, is the baseline
+	// reading taken during the startup delay, not this event, is the baseline
 	if events[0].CPU == nil || events[0].CPU.UsedPercent == nil {
 		t.Fatal("expected cpu.usedPercent on the startup event")
 	}
 }
 
-func TestCollector_WarmUpDoesNotDelayShutdown(t *testing.T) {
+func TestCollector_StartupDelayDoesNotHoldUpShutdown(t *testing.T) {
 	pub := &fakePublisher{}
 	c := New("resources-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
 
-	// Cancelled well inside the warm-up window: Run must return rather than
+	// Cancelled well inside the startup delay: Run must return rather than
 	// hold shutdown open for the rest of it
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
 	c.Run(ctx)
-	if elapsed := time.Since(start); elapsed >= warmUp {
+	if elapsed := time.Since(start); elapsed >= config.StartupDelay {
 		t.Fatalf("expected Run to return when ctx was cancelled, took %s", elapsed)
 	}
 	if n := len(pub.events()); n != 0 {
-		t.Fatalf("expected nothing published when cancelled during warm-up, got %d", n)
+		t.Fatalf("expected nothing published when cancelled during the startup delay, got %d", n)
 	}
 }

@@ -59,11 +59,11 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
-	// Take the baseline for the differenced values, wait out the warm-up,
-	// then publish, so the first event is complete instead of missing
-	// cpu.usedPercent and network. Without this the first event carrying
-	// them is one whole interval away — a day, on a daily interval.
-	if !c.primeRates(ctx) {
+	// Read the differenced metrics first, so the startup delay doubles as
+	// the window they are measured over and the first event is complete
+	// rather than missing cpu.usedPercent and network until the next tick.
+	c.primeRates()
+	if !config.WaitForStartup(ctx, c.interval) {
 		return
 	}
 	c.collectAndPublish(ctx)
@@ -78,39 +78,17 @@ func (c *Collector) Run(ctx context.Context) {
 	}
 }
 
-// warmUp is the gap between the baseline reading taken at startup and the
-// first published event. cpu.usedPercent and the network rates are
-// differences between two readings, so they need a window to be measured
-// over; a second is long enough to be a real measurement and short enough
-// that the first event is still prompt.
-const warmUp = time.Second
-
-// primeRates takes the first reading of the differenced metrics and waits out
-// the warm-up window, so the event published next has something to difference
-// against. Nothing is published here, and the reading is stored by the same
-// code paths the ticker uses rather than a second copy of them.
+// primeRates takes the first reading of the differenced metrics, so the event
+// published after the startup delay has something to difference against.
+// Nothing is published here, and the reading is stored by the same code paths
+// the ticker uses rather than a second copy of them.
 //
 // A reading that fails is not retried: the first event then omits those
-// fields, exactly as it did before there was a warm-up. Returns false when
-// ctx is cancelled during the wait, so shutdown is not held up for a second.
-func (c *Collector) primeRates(ctx context.Context) bool {
+// fields, exactly as it did before there was a baseline.
+func (c *Collector) primeRates() {
 	var discard model.CPUGroup
 	c.addCPUStat(&discard)
 	c.networkGroup()
-
-	wait := warmUp
-	if c.interval < wait {
-		wait = c.interval
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
 
 func (c *Collector) collectAndPublish(ctx context.Context) {

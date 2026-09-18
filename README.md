@@ -107,7 +107,7 @@ Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all 
 
 ### Resources
 
-When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, swap and network is published to `resources.channel` on startup and then every `resources.interval`:
+When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, swap and network is published to `resources.channel` a second after startup and then every `resources.interval`:
 
 ```json
 {
@@ -155,7 +155,7 @@ Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, 
 | `/proc/meminfo` without `SwapTotal`/`SwapFree` | the whole `swap` group | Omitted, `memory` still publishes |
 | `/proc/net/dev` | the whole `network` group | Omitted, the tick still publishes |
 
-`cpu.count` is the number of online logical CPUs (the `cpu0` … `cpuN` lines of `/proc/stat`, the same figure as `nproc`). Load average is measured against it: `load1` of 4 is a full 4-CPU server but a mostly idle 64-CPU one. Unlike `cpu.usedPercent` it needs no previous sample and no warm-up.
+`cpu.count` is the number of online logical CPUs (the `cpu0` … `cpuN` lines of `/proc/stat`, the same figure as `nproc`). Load average is measured against it: `load1` of 4 is a full 4-CPU server but a mostly idle 64-CPU one. Unlike `cpu.usedPercent` it needs no previous sample, so it is there from the first event.
 
 Memory values are bytes (`/proc/meminfo` reports kB, multiplied by 1024). `memory.availableBytes` is `MemAvailable`, not `MemFree`, so it accounts for reclaimable page cache. `memory.usedBytes` is `MemTotal - available` and `memory.usedPercent` is `used / MemTotal × 100`, so used and available always add up to total.
 
@@ -180,15 +180,15 @@ pct  = 100 * busy / (total_now - total_prev)
 
 `total` excludes the `guest` and `guest_nice` columns. The kernel already counts time spent running VMs inside `user` and `nice`, so adding those columns again would inflate `total` and busy time by the same amount and make `cpu.usedPercent` read too high on a host running VMs (e.g. 70% real busy reported as ~79%). On an ordinary server or inside a VM both columns are `0`, and the result is unchanged.
 
-Because it needs two samples, the collector takes a baseline reading at startup and waits a one-second warm-up before publishing, so `cpu.usedPercent` is present from the very first event — its window is that warm-up second rather than a full interval. It is omitted only when `/proc/stat` cannot be read, or when the counters move backwards, which is what a reboot between ticks looks like. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
+Because it needs two samples, the collector takes a baseline reading at startup and publishes a second later, so `cpu.usedPercent` is present from the very first event — its window is that second rather than a full interval. It is omitted only when `/proc/stat` cannot be read, or when the counters move backwards, which is what a reboot between ticks looks like. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
 
 `network.rxBytesPerSec` (download) and `network.txBytesPerSec` (upload) are the **mean rate in bytes per second over the interval**, differencing two `/proc/net/dev` samples and dividing by the wall-clock time between them. Multiply by 8 for bits per second. They are summed over **physical interfaces only** — those with a `/sys/class/net/<iface>/device` link — so loopback, Docker bridges, veths and tunnels are excluded; counting them would double count traffic that also crosses the NIC. An interface that appears between two ticks is left out of that window, since it has no baseline.
 
-The `network` group follows the same rules as `cpu.usedPercent`: present from the first event thanks to the same warm-up reading, and absent when any counter moves backwards (a driver reload). A host with no physical interface — e.g. the agent running inside a container — never reports it.
+The `network` group follows the same rules as `cpu.usedPercent`: present from the first event thanks to the same baseline reading, and absent when any counter moves backwards (a driver reload). A host with no physical interface — e.g. the agent running inside a container — never reports it.
 
 ### Storage
 
-When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` on startup and then every `storage.interval`:
+When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` a second after startup and then every `storage.interval`:
 
 ```json
 {
@@ -285,7 +285,7 @@ Storage runs as its own component, separate from resources, so a `statfs` stuck 
 
 ### Heartbeat
 
-When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — on startup and then every `heartbeat.interval`:
+When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — a second after startup and then every `heartbeat.interval`:
 
 ```json
 { "serverId": "your-server-id" }
@@ -311,7 +311,7 @@ Config is JSON or YAML — picked automatically by the file's extension (`.json`
 
 The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
 
-Every collector publishes once as soon as it starts and then on its interval, so a restarted agent reports within a second instead of going silent for a whole interval — long enough, on a 30s interval, for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. The heartbeat and storage events go out immediately. `resources` first takes a baseline reading and waits one second, so its startup event is complete rather than missing the two values that are differences between readings; without that they would not appear until a whole interval had passed, which on a long interval is a long time to publish an incomplete event.
+Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All three wait the same second, so the first heartbeat, resources and storage events go out together. `resources` spends that second taking the baseline reading its rates are differenced against, so its first event is complete rather than missing `cpu.usedPercent` and `network`. An interval shorter than a second is not delayed by it.
 
 The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
