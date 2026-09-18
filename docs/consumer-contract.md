@@ -24,12 +24,14 @@ guaranteed to be there.
    is present. There is no half-filled group.
 6. **Lists are always present**, as `[]` when empty. Never `null`, never
    absent.
-7. **Every collector publishes once a second after startup**, then on its own
-   interval. A consumer sees one event per channel right after an agent
-   restart, out of step with the interval it was expecting and carrying no
-   marker saying so. It is a complete event, but its rates are measured over
-   that one second rather than a full interval, so on a long interval the
-   first point covers a much shorter window than the rest.
+7. **The interval-driven events — `resources`, `storage` and `heartbeat` —
+   publish once a second after startup**, then on their own intervals. A
+   consumer sees one event per channel right after an agent restart, out of
+   step with the interval it was expecting and carrying no marker saying so.
+   It is a complete event, but any rate in it is measured over that one second
+   rather than a full interval, so on a long interval the first point covers a
+   much shorter window than the rest. `logs` is not on a schedule: an event is
+   published when a line is written.
 8. **New fields get added over time.** A consumer must ignore keys it does not
    recognise rather than reject the event.
 
@@ -140,9 +142,10 @@ can exceed 2³¹, so a 32-bit integer type is not enough. `rxBytesPerSec` and
 `cpu.usedPercent` and the `network` group are the two values measured between
 two readings rather than read directly. Normally both are present from the
 first event — the agent takes a baseline reading at startup and
-publishes a second later. They drop out only when their source
-file cannot be read, or when the kernel counters move backwards, which is what
-a reboot between two readings looks like.
+publishes a second later. They drop out when their source file cannot be read or parsed, when the kernel
+counters move backwards — what a reboot between two readings looks like — or
+when there is nothing to compare: no interface common to both readings, or CPU
+counters that have not advanced at all.
 
 ```json
 {
@@ -197,11 +200,11 @@ The worst case, where nothing at all could be read, is still a valid event:
 | `uptimeSeconds` | `/proc/uptime` unreadable |
 | `cpu` | neither `/proc/stat` nor `/proc/loadavg` readable |
 | `cpu.count` | `/proc/stat` unreadable or unparseable |
-| `cpu.usedPercent` | same, or the counters moved backwards (a reboot between readings) |
+| `cpu.usedPercent` | same, the counters moved backwards (a reboot between readings), or they did not advance at all between two readings |
 | `cpu.load1`, `load5`, `load15` | `/proc/loadavg` unreadable — all three together, never one alone |
 | `memory` | `/proc/meminfo` unreadable, or its memory lines are missing |
 | `swap` | `/proc/meminfo` unreadable, or its swap lines are missing |
-| `network` | `/proc/net/dev` unreadable, the counters moved backwards, or the host has no physical interface |
+| `network` | `/proc/net/dev` unreadable, the counters moved backwards, or no physical interface is present in both readings |
 
 A server with no swap reports `swap` with all three fields `0` — that is a
 measurement, not an absence.
