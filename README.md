@@ -19,6 +19,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Optional resources collector publishes server uptime, load average, CPU utilisation, memory/swap and network throughput as one JSON event on its own timer
 - Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collectors, so a wedged storage read can't make a healthy server look down
+- The resources, storage and heartbeat events all publish one second after start and then on their own intervals, so a restarted agent reports at once instead of after a whole interval of silence
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Requirements
@@ -180,11 +181,11 @@ pct  = 100 * busy / (total_now - total_prev)
 
 `total` excludes the `guest` and `guest_nice` columns. The kernel already counts time spent running VMs inside `user` and `nice`, so adding those columns again would inflate `total` and busy time by the same amount and make `cpu.usedPercent` read too high on a host running VMs (e.g. 70% real busy reported as ~79%). On an ordinary server or inside a VM both columns are `0`, and the result is unchanged.
 
-Because it needs two samples, the collector takes a baseline reading at startup and publishes a second later, so `cpu.usedPercent` is present from the very first event — its window is that second rather than a full interval. It is omitted only when `/proc/stat` cannot be read, or when the counters move backwards, which is what a reboot between ticks looks like. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
+Because it needs two samples, the collector takes a baseline reading at startup and publishes a second later, so `cpu.usedPercent` is present from the very first event — its window is that second rather than a full interval. It is omitted when `/proc/stat` cannot be read or parsed, when the counters move backwards (what a reboot between ticks looks like), and when they have not advanced at all between two readings. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
 
 `network.rxBytesPerSec` (download) and `network.txBytesPerSec` (upload) are the **mean rate in bytes per second over the interval**, differencing two `/proc/net/dev` samples and dividing by the wall-clock time between them. Multiply by 8 for bits per second. They are summed over **physical interfaces only** — those with a `/sys/class/net/<iface>/device` link — so loopback, Docker bridges, veths and tunnels are excluded; counting them would double count traffic that also crosses the NIC. An interface that appears between two ticks is left out of that window, since it has no baseline.
 
-The `network` group follows the same rules as `cpu.usedPercent`: present from the first event thanks to the same baseline reading, and absent when any counter moves backwards (a driver reload). A host with no physical interface — e.g. the agent running inside a container — never reports it.
+The `network` group follows the same rules as `cpu.usedPercent`: present from the first event thanks to the same baseline reading, and absent when any counter moves backwards (a driver reload) or no interface is present in both readings. A host with no physical interface — e.g. the agent running inside a container — never reports it.
 
 ### Storage
 
