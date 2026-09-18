@@ -19,6 +19,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Optional resources collector publishes server uptime, load average, CPU utilisation, memory/swap and network throughput as one JSON event on its own timer
 - Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collectors, so a wedged storage read can't make a healthy server look down
+- The resources, storage and heartbeat events all publish one second after start and then on their own intervals, so a restarted agent reports at once instead of after a whole interval of silence
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Requirements
@@ -68,8 +69,10 @@ log-tailer-go/
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
-└── deploy/
-    └── log-tailer-go.service — systemd unit for production
+├── deploy/
+│   └── log-tailer-go.service — systemd unit for production
+└── docs/
+    └── consumer-contract.md  — what a subscriber can rely on in every event
 ```
 
 Every metric folder under `resources/` and `storage/` has the same four files, one job each:
@@ -89,10 +92,7 @@ Each log line is published as a JSON object:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "path": "/var/log/app/app.log",
   "channel": "your-channel-1",
   "timestamp": "2026-05-28T10:00:00Z",
@@ -100,7 +100,7 @@ Each log line is published as a JSON object:
 }
 ```
 
-Log, resources and storage events all open with the same four identity fields in the same order, so a consumer extracts identity the same way on every channel. `systemId` is the stable key to group or join on — it never changes for a given system, while `systemName` and `serverIp` may change and are refreshed from every event. The heartbeat is the exception: it carries only `systemId` and `serverName`, the pair that identifies a server, and nothing else.
+Every event opens with `serverId`, the id of the server it came from, so a consumer extracts identity the same way on every channel and joins on one field. It is the only identity an event carries: a hostname, address or the system a server belongs to is looked up from that id on the consumer side, rather than copied onto every event where it would go stale. The heartbeat carries `serverId` and nothing else.
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
 
@@ -108,14 +108,11 @@ Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all 
 
 ### Resources
 
-When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, swap and network is published to `resources.channel` every `resources.interval`:
+When `resources.enabled` is `true`, a snapshot of server uptime, CPU, memory, swap and network is published to `resources.channel` a second after startup and then every `resources.interval`:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-05-28T10:00:00Z",
   "uptimeSeconds": 435600,
   "cpu": {
@@ -159,7 +156,7 @@ Every `/proc`-sourced value is **omitted from the JSON when it can't be read**, 
 | `/proc/meminfo` without `SwapTotal`/`SwapFree` | the whole `swap` group | Omitted, `memory` still publishes |
 | `/proc/net/dev` | the whole `network` group | Omitted, the tick still publishes |
 
-`cpu.count` is the number of online logical CPUs (the `cpu0` … `cpuN` lines of `/proc/stat`, the same figure as `nproc`). Load average is measured against it: `load1` of 4 is a full 4-CPU server but a mostly idle 64-CPU one. Unlike `cpu.usedPercent` it needs no previous sample, so it is present from the first tick.
+`cpu.count` is the number of online logical CPUs (the `cpu0` … `cpuN` lines of `/proc/stat`, the same figure as `nproc`). Load average is measured against it: `load1` of 4 is a full 4-CPU server but a mostly idle 64-CPU one. Unlike `cpu.usedPercent` it needs no previous sample, so it is there from the first event.
 
 Memory values are bytes (`/proc/meminfo` reports kB, multiplied by 1024). `memory.availableBytes` is `MemAvailable`, not `MemFree`, so it accounts for reclaimable page cache. `memory.usedBytes` is `MemTotal - available` and `memory.usedPercent` is `used / MemTotal × 100`, so used and available always add up to total.
 
@@ -184,22 +181,19 @@ pct  = 100 * busy / (total_now - total_prev)
 
 `total` excludes the `guest` and `guest_nice` columns. The kernel already counts time spent running VMs inside `user` and `nice`, so adding those columns again would inflate `total` and busy time by the same amount and make `cpu.usedPercent` read too high on a host running VMs (e.g. 70% real busy reported as ~79%). On an ordinary server or inside a VM both columns are `0`, and the result is unchanged.
 
-Because it needs two samples, `cpu.usedPercent` is **omitted on the first tick after startup**, and again on the first tick after a supervised restart (the collector is rebuilt, so the previous sample is gone). It's also omitted if the counters move backwards, which is what a reboot between ticks looks like. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
+Because it needs two samples, the collector takes a baseline reading at startup and publishes a second later, so `cpu.usedPercent` is present from the very first event — its window is that second rather than a full interval. It is omitted when `/proc/stat` cannot be read or parsed, when the counters move backwards (what a reboot between ticks looks like), and when they have not advanced at all between two readings. A short spike inside the interval is flattened into the mean; that's the intended trade, and load average is the finer-grained signal.
 
 `network.rxBytesPerSec` (download) and `network.txBytesPerSec` (upload) are the **mean rate in bytes per second over the interval**, differencing two `/proc/net/dev` samples and dividing by the wall-clock time between them. Multiply by 8 for bits per second. They are summed over **physical interfaces only** — those with a `/sys/class/net/<iface>/device` link — so loopback, Docker bridges, veths and tunnels are excluded; counting them would double count traffic that also crosses the NIC. An interface that appears between two ticks is left out of that window, since it has no baseline.
 
-The `network` group follows the same omission rules as `cpu.usedPercent`: absent on the first tick after startup or a supervised restart, and absent when any counter moves backwards (a driver reload). A host with no physical interface — e.g. the agent running inside a container — never reports it.
+The `network` group follows the same rules as `cpu.usedPercent`: present from the first event thanks to the same baseline reading, and absent when any counter moves backwards (a driver reload) or no interface is present in both readings. A host with no physical interface — e.g. the agent running inside a container — never reports it.
 
 ### Storage
 
-When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` every `storage.interval`:
+When `storage.enabled` is `true`, the server's total local storage and the disk usage of each path in `storage.mounts` are published to `storage.channel` a second after startup and then every `storage.interval`:
 
 ```json
 {
-  "systemId": "your-system-id",
-  "systemName": "your-system-name",
-  "serverName": "your-server-name",
-  "serverIp": "10.0.0.5",
+  "serverId": "your-server-id",
   "timestamp": "2026-05-28T10:00:00Z",
   "server": {
     "totalBytes": 225485783040,
@@ -242,10 +236,24 @@ Values come from `statfs` and match `df -B1` column for column:
 | Case | Published |
 |---|---|
 | Every local filesystem read | `server` with `partial: false` |
-| Some local filesystem can't be statted | `server` summed without it, `partial: true` |
+| Some local filesystem can't be statted | `server` summed without it, `partial: true` and `missingPaths` |
 | None can be read, or no mount table | `server` omitted |
 
-`partial: true` means the total is smaller than the server really has. A failure is logged once when it starts and once when it clears.
+`partial: true` means the total is smaller than the server really has, and `missingPaths` names the mount points left out, sorted:
+
+```json
+"server": {
+  "totalBytes": 214748364800,
+  "usedBytes": 52428800000,
+  "freeBytes": 151582326374,
+  "reservedBytes": 10737238426,
+  "usedPercent": 25.7,
+  "partial": true,
+  "missingPaths": ["/mnt/data"]
+}
+```
+
+A consumer can then say which filesystem is absent without reading the agent's log, and can tell a missing filesystem apart from storage that really shrank. `missingPaths` is omitted entirely when `partial` is false. The failure is also logged, once when it starts and once when it clears.
 
 The total measures mounted, usable storage — not the size of the physical disks: unmounted partitions, swap partitions and unallocated LVM space are not counted. On ext4 and xfs (with or without LVM or mdadm) it equals the sum of `df` for each disk. btrfs figures are the kernel's own estimate, as in `df`. A filesystem type outside the list above is not counted. Network filesystems are never touched, so the total can't block on a dead remote server.
 
@@ -278,13 +286,13 @@ Storage runs as its own component, separate from resources, so a `statfs` stuck 
 
 ### Heartbeat
 
-When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — every `heartbeat.interval`:
+When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — a second after startup and then every `heartbeat.interval`:
 
 ```json
-{ "systemId": "your-system-id", "serverName": "your-server-name" }
+{ "serverId": "your-server-id" }
 ```
 
-That pair is the same identity the live metrics key is built from, so a beat maps to exactly one server. Because every beat names its own sender, one channel carries the beats of every server in a fleet and the consumer tells them apart from the payload — a per-server channel is supported but not needed for that. It is JSON rather than a bare id so a `serverName` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
+That is the same identity the live metrics key is built from, so a beat maps to exactly one server. Because every beat names its own sender, one channel carries the beats of every server in a fleet and the consumer tells them apart from the payload — a per-server channel is supported but not needed for that. It is JSON rather than a bare id so a `serverId` containing a colon can't be misparsed by a consumer splitting on one, and so a field can be added later without a format break.
 
 The heartbeat is deliberately the dumbest component in the agent: it reads no files, stats no mounts and shares no state with the resources or storage collectors, running on its own goroutine and its own ticker. If storage collection wedges on a stuck mount, the beat keeps going — a beat that can stop for any reason other than the agent being dead is worse than no beat at all. Publishes are fire and forget: a failure is logged (throttled) and dropped, never retried, never allowed to delay the next beat.
 
@@ -292,11 +300,19 @@ The heartbeat is deliberately the dumbest component in the agent: it reads no fi
 
 > **Changing `heartbeat.interval` is a coordinated change.** The consumer expires a server's heartbeat key on a TTL of roughly three beats (30s for the default 10s interval). Raising the interval past that TTL makes every healthy server read as offline — silently, and looking exactly like a broken agent. Tell the API side before changing it.
 
+### Field presence
+
+A value the agent cannot read is **left out of the JSON entirely** — never sent as `null`, `0` or `""`. An absent key therefore means *unknown*, which is not the same as zero: a missing `cpu.usedPercent` means the agent could not measure it, while `0` means the CPU was idle. `cpu.usedPercent` and `network` are differences between two readings rather than direct reads, so they are absent when a reading fails or the kernel counters move backwards; a baseline taken at startup means they are present from the first event.
+
+[**docs/consumer-contract.md**](docs/consumer-contract.md) is the full contract for whoever writes the subscriber: every event in its normal and degraded shapes, a table per event of what can be absent and why, and what a consumer has to do about it in any language.
+
 ## Configuration
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
-The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr`, `identity.system.id`, `identity.system.name` and `identity.server.name` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. `identity.server.ip` is optional and publishes as an empty string if omitted. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+
+Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All three wait the same second, so the first heartbeat, resources and storage events go out together. `resources` spends that second taking the baseline reading its rates are differenced against, so its first event is complete rather than missing `cpu.usedPercent` and `network`. An interval shorter than a second is not delayed by it.
 
 The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
@@ -313,10 +329,7 @@ cp config/config.example.yaml config/config.yaml
 | `redis.addr` | Redis address (`host:port`) |
 | `redis.password` | Redis password (empty for none) |
 | `redis.db` | Redis database number (Pub/Sub ignores it; kept for client completeness) |
-| `identity.system.id` | Unique system identifier (stable; published in every event as `systemId`) |
-| `identity.system.name` | System display name (published in every event as `systemName`) |
-| `identity.server.name` | Server hostname (published in every event as `serverName`) |
-| `identity.server.ip` | Server IP address (published in every event as `serverIp`) |
+| `identity.serverId` | Unique server identifier, any non-empty string (stable; published in every event as `serverId`) |
 | `logTailer.enabled` | Enable or disable the tailer |
 | `logTailer.files` | List of `{ path, channel }` entries to tail |
 | `resources.enabled` | Enable or disable the resources collector |

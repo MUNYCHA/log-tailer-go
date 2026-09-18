@@ -49,8 +49,7 @@ func (p *fakePublisher) events(t *testing.T) []model.StorageEvent {
 func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	pub := &fakePublisher{}
 	identity := config.IdentityConfig{
-		System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
-		Server: config.ServerIdentity{Name: "server-1", IP: "10.0.0.5"},
+		ServerID: "server-1",
 	}
 	c := New([]string{"/", "/this/path/does/not/exist/hopefully"}, "storage-channel", identity, 10*time.Millisecond, pub)
 
@@ -67,7 +66,7 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	}
 
 	ev := events[0]
-	if ev.SystemID != "prod-cluster" || ev.SystemName != "Production" || ev.ServerName != "server-1" || ev.ServerIP != "10.0.0.5" {
+	if ev.ServerID != "server-1" {
 		t.Fatalf("expected identity to be copied from config, got %+v", ev)
 	}
 	if ev.Timestamp == "" {
@@ -194,6 +193,47 @@ func TestServerStorage_UnreadableFilesystemIsPartial(t *testing.T) {
 	if !c.failing["/this/path/does/not/exist/hopefully"] {
 		t.Fatal("expected the failure to be remembered so it is logged once")
 	}
+	if len(got.MissingPaths) != 1 || got.MissingPaths[0] != "/this/path/does/not/exist/hopefully" {
+		t.Fatalf("expected the unreadable path named in missingPaths, got %v", got.MissingPaths)
+	}
+}
+
+func TestServerStorage_MissingPathsSortedAndOmittedWhenComplete(t *testing.T) {
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+
+	table := []mounts.Entry{
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "/dev/sdc1", Path: "/zz/missing", FSType: "ext4"},
+		{Device: "/dev/sdb1", Path: "/aa/missing", FSType: "xfs"},
+	}
+	got := c.serverStorage(table)
+	if got == nil {
+		t.Fatal("expected a total from the readable filesystem")
+	}
+	want := []string{"/aa/missing", "/zz/missing"}
+	if len(got.MissingPaths) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got.MissingPaths)
+	}
+	for i, path := range want {
+		if got.MissingPaths[i] != path {
+			t.Fatalf("expected missingPaths sorted as %v, got %v", want, got.MissingPaths)
+		}
+	}
+
+	// A complete total carries no missingPaths key at all, so a consumer can
+	// test for the field's presence rather than for an empty list.
+	c = New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+	complete := c.serverStorage([]mounts.Entry{{Device: "/dev/sda1", Path: "/", FSType: "ext4"}})
+	if complete == nil || complete.Partial {
+		t.Fatalf("expected a complete total, got %+v", complete)
+	}
+	payload, err := json.Marshal(complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("missingPaths")) {
+		t.Fatalf("expected missingPaths omitted from a complete total, got %s", payload)
+	}
 }
 
 func TestServerStorage_NothingReadableOmitsTotal(t *testing.T) {
@@ -257,5 +297,25 @@ func TestMountUsage_FailureLoggedOncePerState(t *testing.T) {
 	c.mountUsage(nil, path)
 	if n := strings.Count(logs.String(), "Failed to stat mount"); n != 2 {
 		t.Fatalf("expected a new failure log after failing again, got %d", n)
+	}
+}
+
+func TestCollector_PublishesOnStartWithoutWaitingTheInterval(t *testing.T) {
+	pub := &fakePublisher{}
+	// An interval far longer than the test: anything published can only be
+	// the collect that runs before the ticker's first tick.
+	c := New([]string{"/"}, "storage-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), config.StartupDelay+300*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events(t)
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one event before the first tick, got %d", len(events))
+	}
+	// Nothing in storage is differenced between ticks, so it is complete
+	if len(events[0].Mounts) != 1 || events[0].Mounts[0].DiskUsage == nil {
+		t.Fatalf("expected the first event to be complete, got %+v", events[0].Mounts)
 	}
 }

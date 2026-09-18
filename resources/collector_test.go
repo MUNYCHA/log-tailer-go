@@ -48,8 +48,7 @@ func (p *fakePublisher) channels() []string {
 func TestCollector_PublishesIdentityAndUptime(t *testing.T) {
 	pub := &fakePublisher{}
 	identity := config.IdentityConfig{
-		System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
-		Server: config.ServerIdentity{Name: "server-1", IP: "10.0.0.5"},
+		ServerID: "server-1",
 	}
 	c := New("resources-channel", identity, 10*time.Millisecond, pub)
 
@@ -66,24 +65,15 @@ func TestCollector_PublishesIdentityAndUptime(t *testing.T) {
 	}
 
 	ev := events[0]
-	if ev.SystemID != "prod-cluster" {
-		t.Fatalf("expected systemId 'prod-cluster', got %q", ev.SystemID)
-	}
-	if ev.SystemName != "Production" {
-		t.Fatalf("expected systemName 'Production', got %q", ev.SystemName)
-	}
-	if ev.ServerName != "server-1" {
-		t.Fatalf("expected serverName 'server-1', got %q", ev.ServerName)
-	}
-	if ev.ServerIP != "10.0.0.5" {
-		t.Fatalf("expected serverIp '10.0.0.5', got %q", ev.ServerIP)
+	if ev.ServerID != "server-1" {
+		t.Fatalf("expected serverId 'server-1', got %q", ev.ServerID)
 	}
 	if ev.UptimeSeconds == nil || *ev.UptimeSeconds <= 0 {
 		t.Fatalf("expected a positive uptimeSeconds, got %v", ev.UptimeSeconds)
 	}
 }
 
-func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
+func TestCollector_PublishesCPUPercentFromTheFirstEvent(t *testing.T) {
 	pub := &fakePublisher{}
 	c := New("resources-channel", config.IdentityConfig{}, 10*time.Millisecond, pub)
 
@@ -92,27 +82,29 @@ func TestCollector_OmitsCPUPercentOnFirstTickOnly(t *testing.T) {
 	c.Run(ctx)
 
 	events := pub.events()
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 events to compare, got %d", len(events))
+	if len(events) == 0 {
+		t.Fatal("expected at least one event")
 	}
 	if events[0].CPU == nil {
-		t.Fatal("expected the cpu group on the first tick (load is available)")
+		t.Fatal("expected the cpu group on the first event")
 	}
 	if events[0].CPU.Count == nil || *events[0].CPU.Count <= 0 {
-		t.Fatalf("expected cpu.count on the first tick (it needs no baseline), got %v", events[0].CPU.Count)
+		t.Fatalf("expected cpu.count on the first event, got %v", events[0].CPU.Count)
 	}
-	if events[0].CPU.UsedPercent != nil {
-		t.Fatalf("expected cpu.usedPercent omitted on the first tick, got %f", *events[0].CPU.UsedPercent)
+	// The reading taken during the startup delay is the baseline, so the very first
+	// published event already has a window to measure over
+	if events[0].CPU.UsedPercent == nil {
+		t.Fatal("expected cpu.usedPercent on the first event, the startup reading gives it a baseline")
 	}
-	if events[1].CPU == nil || events[1].CPU.UsedPercent == nil {
-		t.Fatal("expected cpu.usedPercent on the second tick, got nil")
-	}
-	if pct := *events[1].CPU.UsedPercent; pct < 0 || pct > 100 {
+	if pct := *events[0].CPU.UsedPercent; pct < 0 || pct > 100 {
 		t.Fatalf("expected cpu.usedPercent in [0,100], got %f", pct)
 	}
+	// Later events are not asserted: at this test's 10ms interval the jiffy
+	// counters can be unchanged between two ticks, which legitimately omits
+	// the field. The startup baseline is what this test is about.
 }
 
-func TestCollector_OmitsNetworkOnFirstTickOnly(t *testing.T) {
+func TestCollector_PublishesNetworkFromTheFirstEvent(t *testing.T) {
 	hasPhysical := false
 	if data, err := network.Read(); err == nil {
 		if sample, err := network.Parse(data); err == nil {
@@ -132,17 +124,15 @@ func TestCollector_OmitsNetworkOnFirstTickOnly(t *testing.T) {
 	c.Run(ctx)
 
 	events := pub.events()
-	if len(events) < 2 {
-		t.Fatalf("expected at least 2 events to compare, got %d", len(events))
+	if len(events) == 0 {
+		t.Fatal("expected at least one event")
 	}
-	if events[0].Network != nil {
-		t.Fatal("expected the network group omitted on the first tick")
+	// The reading taken during the startup delay is the baseline for the rates too
+	if events[0].Network == nil {
+		t.Fatal("expected the network group on the first event, the startup reading gives it a baseline")
 	}
-	if events[1].Network == nil {
-		t.Fatal("expected the network group on the second tick, got nil")
-	}
-	if events[1].Network.RxBytesPerSec < 0 || events[1].Network.TxBytesPerSec < 0 {
-		t.Fatalf("expected non-negative rates, got rx %f tx %f", events[1].Network.RxBytesPerSec, events[1].Network.TxBytesPerSec)
+	if events[0].Network.RxBytesPerSec < 0 || events[0].Network.TxBytesPerSec < 0 {
+		t.Fatalf("expected non-negative rates, got rx %f tx %f", events[0].Network.RxBytesPerSec, events[0].Network.TxBytesPerSec)
 	}
 }
 
@@ -203,5 +193,45 @@ func TestResourcesEvent_OmitsMissingGroupsInJSON(t *testing.T) {
 		if _, ok := raw[key]; ok {
 			t.Fatalf("expected %q omitted when nil, got %s", key, payload)
 		}
+	}
+}
+
+func TestCollector_PublishesOnStartWithoutWaitingTheInterval(t *testing.T) {
+	pub := &fakePublisher{}
+	// An interval far longer than the test: anything published can only be
+	// the collect that runs before the ticker's first tick.
+	c := New("resources-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), config.StartupDelay+300*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events()
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one event before the first tick, got %d", len(events))
+	}
+	// Complete despite arriving long before the first interval elapses: the
+	// reading taken during the startup delay, not this event, is the baseline
+	if events[0].CPU == nil || events[0].CPU.UsedPercent == nil {
+		t.Fatal("expected cpu.usedPercent on the startup event")
+	}
+}
+
+func TestCollector_StartupDelayDoesNotHoldUpShutdown(t *testing.T) {
+	pub := &fakePublisher{}
+	c := New("resources-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
+
+	// Cancelled well inside the startup delay: Run must return rather than
+	// hold shutdown open for the rest of it
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	c.Run(ctx)
+	if elapsed := time.Since(start); elapsed >= config.StartupDelay {
+		t.Fatalf("expected Run to return when ctx was cancelled, took %s", elapsed)
+	}
+	if n := len(pub.events()); n != 0 {
+		t.Fatalf("expected nothing published when cancelled during the startup delay, got %d", n)
 	}
 }

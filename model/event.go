@@ -1,14 +1,11 @@
 package model
 
 type LogEvent struct {
-	SystemID   string `json:"systemId"`
-	SystemName string `json:"systemName"`
-	ServerName string `json:"serverName"`
-	ServerIP   string `json:"serverIp"`
-	Path       string `json:"path"`
-	Channel    string `json:"channel"`
-	Timestamp  string `json:"timestamp"`
-	Message    string `json:"message"`
+	ServerID  string `json:"serverId"`
+	Path      string `json:"path"`
+	Channel   string `json:"channel"`
+	Timestamp string `json:"timestamp"`
+	Message   string `json:"message"`
 }
 
 // ResourcesEvent is one snapshot of a server's uptime, cpu, memory, swap and
@@ -16,10 +13,7 @@ type LogEvent struct {
 // from the JSON as a whole rather than sent as zeros — an absent group is
 // "unknown", where 0 would read as a real measurement.
 type ResourcesEvent struct {
-	SystemID      string `json:"systemId"`
-	SystemName    string `json:"systemName"`
-	ServerName    string `json:"serverName"`
-	ServerIP      string `json:"serverIp"`
+	ServerID      string `json:"serverId"`
 	Timestamp     string `json:"timestamp"`
 	UptimeSeconds *int64 `json:"uptimeSeconds,omitempty"`
 
@@ -77,11 +71,8 @@ type NetworkGroup struct {
 // StorageEvent is one snapshot of disk usage for the configured mounts, in
 // config order.
 type StorageEvent struct {
-	SystemID   string `json:"systemId"`
-	SystemName string `json:"systemName"`
-	ServerName string `json:"serverName"`
-	ServerIP   string `json:"serverIp"`
-	Timestamp  string `json:"timestamp"`
+	ServerID  string `json:"serverId"`
+	Timestamp string `json:"timestamp"`
 
 	// Nil when no local filesystem could be read
 	Server *ServerStorage `json:"server,omitempty"`
@@ -96,6 +87,11 @@ type StorageEvent struct {
 type ServerStorage struct {
 	DiskUsage
 	Partial bool `json:"partial"`
+
+	// Mount points left out of the totals because they could not be read,
+	// sorted, so a partial event says which filesystems are missing instead
+	// of leaving that only in the agent's log. Empty when Partial is false.
+	MissingPaths []string `json:"missingPaths,omitempty"`
 }
 
 // MountUsage is one configured path: the filesystem it lives on and its usage.
@@ -125,6 +121,5 @@ type DiskUsage struct {
 // HeartbeatEvent is the entire heartbeat payload: the same identity pair the
 // live metrics key is built from, so a beat maps to exactly one server.
 type HeartbeatEvent struct {
-	SystemID   string `json:"systemId"`
-	ServerName string `json:"serverName"`
+	ServerID string `json:"serverId"`
 }

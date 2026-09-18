@@ -6,14 +6,7 @@
   },
 
   "identity": {
-    "system": {
-      "id": "your-system-id",
-      "name": "your-system-name"
-    },
-    "server": {
-      "name": "your-server-name",
-      "ip": "0.0.0.0"
-    }
+    "serverId": "your-server-id"
   },
 
   "logTailer": {

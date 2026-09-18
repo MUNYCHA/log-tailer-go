@@ -1,9 +1,37 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
+
+// StartupDelay is how long every collector waits before its first event, so
+// they all publish together on startup instead of one per interval boundary.
+// The resources collector spends it taking the baseline reading its rates are
+// differenced against, so the wait costs nothing there.
+const StartupDelay = time.Second
+
+// WaitForStartup blocks until the startup delay has passed, or until the
+// collector's own interval has, whichever is shorter — a sub-second interval
+// is not slowed down to wait for it. It reports false when ctx was cancelled
+// first, meaning the caller should return without publishing rather than hold
+// shutdown open.
+func WaitForStartup(ctx context.Context, interval time.Duration) bool {
+	wait := StartupDelay
+	if interval < wait {
+		wait = interval
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 
 type AppConfig struct {
 	Redis     RedisConfig     `json:"redis"`
@@ -20,19 +48,13 @@ type RedisConfig struct {
 	DB       int    `json:"db"`
 }
 
+// IdentityConfig names the server every event comes from. It is one opaque
+// id on purpose: a consumer joins on it, and anything else about the server —
+// its hostname, address or which system it belongs to — is looked up there
+// rather than carried on every event, where it would be a copy that goes
+// stale.
 type IdentityConfig struct {
-	System SystemIdentity `json:"system"`
-	Server ServerIdentity `json:"server"`
-}
-
-type SystemIdentity struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type ServerIdentity struct {
-	Name string `json:"name"`
-	IP   string `json:"ip"`
+	ServerID string `json:"serverId"`
 }
 
 type LogTailerConfig struct {
@@ -104,14 +126,8 @@ func (c *AppConfig) Validate() error {
 	if c.Redis.Addr == "" {
 		return fmt.Errorf("'redis.addr' is required")
 	}
-	if c.Identity.System.ID == "" {
-		return fmt.Errorf("'identity.system.id' is required")
-	}
-	if c.Identity.System.Name == "" {
-		return fmt.Errorf("'identity.system.name' is required")
-	}
-	if c.Identity.Server.Name == "" {
-		return fmt.Errorf("'identity.server.name' is required")
+	if c.Identity.ServerID == "" {
+		return fmt.Errorf("'identity.serverId' is required")
 	}
 	if c.LogTailer.Enabled {
 		if len(c.LogTailer.Files) == 0 {
