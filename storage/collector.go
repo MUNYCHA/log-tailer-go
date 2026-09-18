@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"time"
 
 	"log-tailer-go/config"
@@ -112,15 +113,17 @@ func readMountTable() []mounts.Entry {
 
 // serverStorage sums every local filesystem in the mount table, each counted
 // once. A filesystem that can't be statted is left out and marks the total
-// partial; the total is omitted when none can be read. Network filesystems
-// are never in the table's local set, so this never blocks on a dead remote.
+// partial, naming it in MissingPaths so the event says what is absent without
+// the reader having to find the log line; the total is omitted when none can
+// be read. Network filesystems are never in the table's local set, so this
+// never blocks on a dead remote.
 func (c *Collector) serverStorage(table []mounts.Entry) *model.ServerStorage {
 	var usages []disk.Usage
-	partial := false
+	var missing []string
 	for _, fs := range mounts.LocalFilesystems(table) {
 		stat, err := disk.Read(fs.Path)
 		if err != nil {
-			partial = true
+			missing = append(missing, fs.Path)
 			if !c.failing[fs.Path] {
 				slog.Warn("Failed to stat local filesystem, server storage total is partial", "path", fs.Path, "device", fs.Device, "error", err)
 				c.failing[fs.Path] = true
@@ -143,6 +146,8 @@ func (c *Collector) serverStorage(table []mounts.Entry) *model.ServerStorage {
 		return nil
 	}
 
+	sort.Strings(missing)
+
 	total := disk.Total(usages)
 	return &model.ServerStorage{
 		DiskUsage: model.DiskUsage{
@@ -152,7 +157,8 @@ func (c *Collector) serverStorage(table []mounts.Entry) *model.ServerStorage {
 			ReservedBytes: total.ReservedBytes,
 			UsedPercent:   total.UsedPercent,
 		},
-		Partial: partial,
+		Partial:      len(missing) > 0,
+		MissingPaths: missing,
 	}
 }
 

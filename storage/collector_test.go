@@ -194,6 +194,47 @@ func TestServerStorage_UnreadableFilesystemIsPartial(t *testing.T) {
 	if !c.failing["/this/path/does/not/exist/hopefully"] {
 		t.Fatal("expected the failure to be remembered so it is logged once")
 	}
+	if len(got.MissingPaths) != 1 || got.MissingPaths[0] != "/this/path/does/not/exist/hopefully" {
+		t.Fatalf("expected the unreadable path named in missingPaths, got %v", got.MissingPaths)
+	}
+}
+
+func TestServerStorage_MissingPathsSortedAndOmittedWhenComplete(t *testing.T) {
+	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+
+	table := []mounts.Entry{
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "/dev/sdc1", Path: "/zz/missing", FSType: "ext4"},
+		{Device: "/dev/sdb1", Path: "/aa/missing", FSType: "xfs"},
+	}
+	got := c.serverStorage(table)
+	if got == nil {
+		t.Fatal("expected a total from the readable filesystem")
+	}
+	want := []string{"/aa/missing", "/zz/missing"}
+	if len(got.MissingPaths) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got.MissingPaths)
+	}
+	for i, path := range want {
+		if got.MissingPaths[i] != path {
+			t.Fatalf("expected missingPaths sorted as %v, got %v", want, got.MissingPaths)
+		}
+	}
+
+	// A complete total carries no missingPaths key at all, so a consumer can
+	// test for the field's presence rather than for an empty list.
+	c = New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+	complete := c.serverStorage([]mounts.Entry{{Device: "/dev/sda1", Path: "/", FSType: "ext4"}})
+	if complete == nil || complete.Partial {
+		t.Fatalf("expected a complete total, got %+v", complete)
+	}
+	payload, err := json.Marshal(complete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("missingPaths")) {
+		t.Fatalf("expected missingPaths omitted from a complete total, got %s", payload)
+	}
 }
 
 func TestServerStorage_NothingReadableOmitsTotal(t *testing.T) {
