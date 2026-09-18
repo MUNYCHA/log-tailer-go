@@ -306,6 +306,129 @@ The heartbeat is deliberately the dumbest component in the agent: it reads no fi
 
 > **Changing `heartbeat.interval` is a coordinated change.** The consumer expires a server's heartbeat key on a TTL of roughly three beats (30s for the default 10s interval). Raising the interval past that TTL makes every healthy server read as offline — silently, and looking exactly like a broken agent. Tell the API side before changing it.
 
+### Field presence
+
+Every key below that is marked optional is **left out of the JSON entirely** when its value is unknown — it is never sent as `null`, `0` or `""`. A consumer must therefore treat an absent key as *unknown*, which is not the same as zero: a missing `cpu.usedPercent` means the agent could not measure it, while `0` means the CPU was genuinely idle.
+
+Two absences are routine rather than faults. `cpu.usedPercent` and `network` are differences against the previous tick, so the first event after the agent starts — including after a supervised restart — omits them. A consumer sees this several times a day in normal operation and must not alarm on it.
+
+| Event | Always present | Optional | Absent means |
+|---|---|---|---|
+| `logs` | every field | — | — |
+| `heartbeat` | every field | — | — |
+| `resources` | the 4 identity fields, `timestamp` | `uptimeSeconds` | `/proc/uptime` unreadable |
+| | | `cpu` | neither `/proc/stat` nor `/proc/loadavg` readable |
+| | | `cpu.count`, `cpu.usedPercent` | `/proc/stat` unreadable, or first tick (`usedPercent` only) |
+| | | `cpu.load1`, `cpu.load5`, `cpu.load15` | `/proc/loadavg` unreadable — all three go together |
+| | | `memory`, `swap` | `/proc/meminfo` unreadable, or that group's lines are missing |
+| | | `network` | `/proc/net/dev` unreadable, or first tick |
+| `storage` | the 4 identity fields, `timestamp`, `mounts` | `server` | no local filesystem could be read |
+| | | `server.missingPaths` | the total is complete (`partial: false`) |
+| | | `mounts[].device`, `mounts[].fsType` | not found in the mount table |
+| | | `mounts[].totalBytes` … `usedPercent` | that path could not be read — `error` is present instead |
+| | | `mounts[].error` | that path was read successfully |
+
+`memory`, `swap`, `network` and `mounts[]`'s five size fields are all-or-nothing: either every field of the group is present, or the whole group is. There is no half-filled group.
+
+`mounts` is always present, as `[]` when no mounts are configured — never `null`.
+
+#### Degraded shapes
+
+A `resources` event on the first tick after start, on a server whose `/proc/loadavg` is also unreadable:
+
+```json
+{
+  "systemId": "your-system-id",
+  "systemName": "your-system-name",
+  "serverName": "your-server-name",
+  "serverIp": "10.0.0.5",
+  "timestamp": "2026-05-28T10:00:00Z",
+  "uptimeSeconds": 864000,
+  "cpu": { "count": 8 },
+  "memory": { "totalBytes": 16785440768, "usedBytes": 4271898624, "availableBytes": 12513542144, "usedPercent": 25.45, "estimated": false },
+  "swap": { "totalBytes": 0, "usedBytes": 0, "usedPercent": 0 }
+}
+```
+
+`cpu.usedPercent` and `network` are absent because there is no previous tick to difference against; `load1/5/15` because the file could not be read. The next tick carries all of them.
+
+A `storage` event where one local filesystem could not be statted and one configured mount is down:
+
+```json
+{
+  "systemId": "your-system-id",
+  "systemName": "your-system-name",
+  "serverName": "your-server-name",
+  "serverIp": "10.0.0.5",
+  "timestamp": "2026-05-28T10:00:00Z",
+  "server": {
+    "totalBytes": 214748364800,
+    "usedBytes": 52428800000,
+    "freeBytes": 151582326374,
+    "reservedBytes": 10737238426,
+    "usedPercent": 25.7,
+    "partial": true,
+    "missingPaths": ["/mnt/data"]
+  },
+  "mounts": [
+    { "path": "/", "device": "/dev/sda1", "fsType": "ext4", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151582326374, "reservedBytes": 10737238426, "usedPercent": 25.7 },
+    { "path": "/mnt/data", "error": "no such file or directory" }
+  ]
+}
+```
+
+The worst case, where nothing could be read at all, still publishes identity and `mounts`:
+
+```json
+{
+  "systemId": "your-system-id",
+  "systemName": "your-system-name",
+  "serverName": "your-server-name",
+  "serverIp": "10.0.0.5",
+  "timestamp": "2026-05-28T10:00:00Z",
+  "mounts": []
+}
+```
+
+An event never fails as a whole: one unreadable file costs that one group, never the rest.
+
+#### Mapping it in a consumer
+
+The rule in any language is *absent is a valid value, not an error*. Only the declaration differs:
+
+| Language | Absent key yields | What to write |
+|---|---|---|
+| Java (Jackson) | field keeps its default | boxed types — see below |
+| Go | the zero value, automatically | nothing |
+| TypeScript | `undefined` | `x.missingPaths ?? []` |
+| Python | `KeyError` on `d["k"]` | `d.get("k", [])` |
+| Rust (serde) | a decode error | `#[serde(default)]` |
+| Postgres JSONB | SQL `NULL` | `coalesce(x->'missingPaths', '[]'::jsonb)` |
+
+For a Java consumer, Jackson leaves an absent field at its Java default, which makes **primitive types the one real hazard**: declaring `long uptimeSeconds` turns a missing value into `0`, and the consumer charts a server that has been up for ten days as one that just rebooted. Box every optional scalar so the unknown stays visible as `null`:
+
+```java
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class ResourcesEvent {
+    public String systemId, systemName, serverName, serverIp, timestamp;
+    public Long uptimeSeconds;      // null when unknown, never 0
+    public CpuGroup cpu;            // null when unreadable
+    public MemoryGroup memory, swap;
+    public NetworkGroup network;    // null on the first tick
+}
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class CpuGroup {
+    public Integer count;
+    public Double usedPercent;      // null on the first tick
+    public Double load1, load5, load15;
+}
+```
+
+Use primitives only for fields the table above lists as always present: the identity fields, `timestamp`, `partial`, and the numbers *inside* a group, which are present whenever the group itself is.
+
+`ignoreUnknown = true` matters as much as the boxing: fields are added to these events over time — `server.missingPaths` was — and a consumer that fails on an unknown key breaks on an agent upgrade it was never told about.
+
 ## Configuration
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
