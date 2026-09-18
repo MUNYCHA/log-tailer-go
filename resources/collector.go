@@ -59,11 +59,13 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
-	// Collect once immediately, then on the interval, so a restarted agent
-	// reports within a second rather than after a whole interval of silence.
-	// This first event is also the baseline for the two values that are
-	// differences between ticks, so it carries no cpu.usedPercent and no
-	// network — those arrive with the second event, as they always have.
+	// Take the baseline for the differenced values, wait out the warm-up,
+	// then publish, so the first event is complete instead of missing
+	// cpu.usedPercent and network. Without this the first event carrying
+	// them is one whole interval away — a day, on a daily interval.
+	if !c.primeRates(ctx) {
+		return
+	}
 	c.collectAndPublish(ctx)
 
 	for {
@@ -73,6 +75,41 @@ func (c *Collector) Run(ctx context.Context) {
 		case <-ticker.C:
 			c.collectAndPublish(ctx)
 		}
+	}
+}
+
+// warmUp is the gap between the baseline reading taken at startup and the
+// first published event. cpu.usedPercent and the network rates are
+// differences between two readings, so they need a window to be measured
+// over; a second is long enough to be a real measurement and short enough
+// that the first event is still prompt.
+const warmUp = time.Second
+
+// primeRates takes the first reading of the differenced metrics and waits out
+// the warm-up window, so the event published next has something to difference
+// against. Nothing is published here, and the reading is stored by the same
+// code paths the ticker uses rather than a second copy of them.
+//
+// A reading that fails is not retried: the first event then omits those
+// fields, exactly as it did before there was a warm-up. Returns false when
+// ctx is cancelled during the wait, so shutdown is not held up for a second.
+func (c *Collector) primeRates(ctx context.Context) bool {
+	var discard model.CPUGroup
+	c.addCPUStat(&discard)
+	c.networkGroup()
+
+	wait := warmUp
+	if c.interval < wait {
+		wait = c.interval
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

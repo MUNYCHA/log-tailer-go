@@ -26,7 +26,10 @@ guaranteed to be there.
    absent.
 7. **Every collector publishes once at startup**, then on its interval. A
    consumer sees an event immediately after an agent restart, out of step with
-   the interval it was expecting. It carries no marker saying so.
+   the interval it was expecting. It carries no marker saying so, and it is a
+   complete event — the rates in it are measured over a one-second warm-up
+   rather than a full interval, so on a long interval the first point covers a
+   much shorter window than the rest.
 8. **New fields get added over time.** A consumer must ignore keys it does not
    recognise rather than reject the event.
 
@@ -132,10 +135,14 @@ Percentages are unrounded floats in `[0, 100]`. Byte counts are whole bytes and
 can exceed 2³¹, so a 32-bit integer type is not enough. `rxBytesPerSec` and
 `txBytesPerSec` are means over the interval just ended, not instantaneous.
 
-### First tick after start
+### Rates missing
 
-**This is not an error and a consumer will see it several times a day** — on
-every agent start, config reload and supervised restart.
+`cpu.usedPercent` and the `network` group are the two values measured between
+two readings rather than read directly. Normally both are present from the
+first event — the agent takes a baseline reading at startup and waits a
+one-second warm-up before publishing. They drop out only when their source
+file cannot be read, or when the kernel counters move backwards, which is what
+a reboot between two readings looks like.
 
 ```json
 {
@@ -153,15 +160,9 @@ every agent start, config reload and supervised restart.
 }
 ```
 
-`cpu.usedPercent` and the whole `network` group are absent. Both are
-differences between two ticks, and the first tick has nothing to difference
-against. The next event carries them.
-
-The agent publishes this event immediately on startup rather than waiting out
-an interval, so it arrives as soon as the agent is up and the complete one
-follows a full interval later.
-
-Do not alarm on this, and do not backfill it with `0`.
+When that happens the keys are absent rather than zero. Do not backfill them
+with `0`: a missing rate means unmeasured, and charting it as 0 reads as an
+idle CPU or a silent network.
 
 ### Degraded
 
@@ -196,11 +197,11 @@ The worst case, where nothing at all could be read, is still a valid event:
 | `uptimeSeconds` | `/proc/uptime` unreadable |
 | `cpu` | neither `/proc/stat` nor `/proc/loadavg` readable |
 | `cpu.count` | `/proc/stat` unreadable or unparseable |
-| `cpu.usedPercent` | same, **or the first tick after start** |
+| `cpu.usedPercent` | same, or the counters moved backwards (a reboot between readings) |
 | `cpu.load1`, `load5`, `load15` | `/proc/loadavg` unreadable — all three together, never one alone |
 | `memory` | `/proc/meminfo` unreadable, or its memory lines are missing |
 | `swap` | `/proc/meminfo` unreadable, or its swap lines are missing |
-| `network` | `/proc/net/dev` unreadable, **or the first tick after start** |
+| `network` | `/proc/net/dev` unreadable, the counters moved backwards, or the host has no physical interface |
 
 A server with no swap reports `swap` with all three fields `0` — that is a
 measurement, not an absence.
