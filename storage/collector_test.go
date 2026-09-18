@@ -49,8 +49,7 @@ func (p *fakePublisher) events(t *testing.T) []model.StorageEvent {
 func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	pub := &fakePublisher{}
 	identity := config.IdentityConfig{
-		System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
-		Server: config.ServerIdentity{Name: "server-1", IP: "10.0.0.5"},
+		ServerID: "server-1",
 	}
 	c := New([]string{"/", "/this/path/does/not/exist/hopefully"}, "storage-channel", identity, 10*time.Millisecond, pub)
 
@@ -67,7 +66,7 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	}
 
 	ev := events[0]
-	if ev.SystemID != "prod-cluster" || ev.SystemName != "Production" || ev.ServerName != "server-1" || ev.ServerIP != "10.0.0.5" {
+	if ev.ServerID != "server-1" {
 		t.Fatalf("expected identity to be copied from config, got %+v", ev)
 	}
 	if ev.Timestamp == "" {

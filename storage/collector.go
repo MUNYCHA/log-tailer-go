@@ -82,13 +82,10 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 	}
 
 	event := model.StorageEvent{
-		SystemID:   c.identity.System.ID,
-		SystemName: c.identity.System.Name,
-		ServerName: c.identity.Server.Name,
-		ServerIP:   c.identity.Server.IP,
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Server:     c.serverStorage(table),
-		Mounts:     usage,
+		ServerID:  c.identity.ServerID,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Server:    c.serverStorage(table),
+		Mounts:    usage,
 	}
 
 	payload, err := json.Marshal(event)

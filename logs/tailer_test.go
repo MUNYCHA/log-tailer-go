@@ -18,8 +18,7 @@ import (
 
 // testIdentity is the identity every tailer under test publishes with.
 var testIdentity = config.IdentityConfig{
-	System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
-	Server: config.ServerIdentity{Name: "test-server", IP: "10.0.0.5"},
+	ServerID: "test-server",
 }
 
 // Timeouts are generous because the tests run against the tailer's real
@@ -170,17 +169,8 @@ func TestEventFields(t *testing.T) {
 	pub.waitForMessages(t, 1, fastWait)
 
 	ev := pub.allEvents()[0]
-	if ev.SystemID != "prod-cluster" {
-		t.Errorf("SystemID = %q, want %q", ev.SystemID, "prod-cluster")
-	}
-	if ev.SystemName != "Production" {
-		t.Errorf("SystemName = %q, want %q", ev.SystemName, "Production")
-	}
-	if ev.ServerName != "test-server" {
-		t.Errorf("ServerName = %q, want %q", ev.ServerName, "test-server")
-	}
-	if ev.ServerIP != "10.0.0.5" {
-		t.Errorf("ServerIP = %q, want %q", ev.ServerIP, "10.0.0.5")
+	if ev.ServerID != "test-server" {
+		t.Errorf("ServerID = %q, want %q", ev.ServerID, "test-server")
 	}
 	if ev.Path != path {
 		t.Errorf("Path = %q, want %q", ev.Path, path)

@@ -48,8 +48,7 @@ func (p *fakePublisher) channels() []string {
 func TestCollector_PublishesIdentityAndUptime(t *testing.T) {
 	pub := &fakePublisher{}
 	identity := config.IdentityConfig{
-		System: config.SystemIdentity{ID: "prod-cluster", Name: "Production"},
-		Server: config.ServerIdentity{Name: "server-1", IP: "10.0.0.5"},
+		ServerID: "server-1",
 	}
 	c := New("resources-channel", identity, 10*time.Millisecond, pub)
 
@@ -66,17 +65,8 @@ func TestCollector_PublishesIdentityAndUptime(t *testing.T) {
 	}
 
 	ev := events[0]
-	if ev.SystemID != "prod-cluster" {
-		t.Fatalf("expected systemId 'prod-cluster', got %q", ev.SystemID)
-	}
-	if ev.SystemName != "Production" {
-		t.Fatalf("expected systemName 'Production', got %q", ev.SystemName)
-	}
-	if ev.ServerName != "server-1" {
-		t.Fatalf("expected serverName 'server-1', got %q", ev.ServerName)
-	}
-	if ev.ServerIP != "10.0.0.5" {
-		t.Fatalf("expected serverIp '10.0.0.5', got %q", ev.ServerIP)
+	if ev.ServerID != "server-1" {
+		t.Fatalf("expected serverId 'server-1', got %q", ev.ServerID)
 	}
 	if ev.UptimeSeconds == nil || *ev.UptimeSeconds <= 0 {
 		t.Fatalf("expected a positive uptimeSeconds, got %v", ev.UptimeSeconds)

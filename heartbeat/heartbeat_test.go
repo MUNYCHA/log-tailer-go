@@ -37,12 +37,11 @@ func (p *fakePublisher) count() int {
 
 func identity() config.IdentityConfig {
 	return config.IdentityConfig{
-		System: config.SystemIdentity{ID: "dev-test", Name: "dev-test"},
-		Server: config.ServerIdentity{Name: "dev-box", IP: "127.0.0.1"},
+		ServerID: "dev-box",
 	}
 }
 
-func TestEmitter_PublishesIdentityPairOnConfiguredChannel(t *testing.T) {
+func TestEmitter_PublishesServerIDOnConfiguredChannel(t *testing.T) {
 	pub := &fakePublisher{}
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
 	defer cancel()
@@ -59,17 +58,18 @@ func TestEmitter_PublishesIdentityPairOnConfiguredChannel(t *testing.T) {
 	if err := json.Unmarshal(pub.payloads[0], &beat); err != nil {
 		t.Fatalf("beat is not valid JSON: %v", err)
 	}
-	if beat.SystemID != "dev-test" || beat.ServerName != "dev-box" {
-		t.Fatalf("expected the systemId/serverName pair, got %+v", beat)
+	if beat.ServerID != "dev-box" {
+		t.Fatalf("expected the serverId, got %+v", beat)
 	}
 
-	// The payload carries identity and nothing else — no server id, no host data
+	// The payload carries the server id and nothing else — no host data,
+	// no measurements, nothing that could fail to be read
 	var raw map[string]any
 	if err := json.Unmarshal(pub.payloads[0], &raw); err != nil {
 		t.Fatalf("beat is not a JSON object: %v", err)
 	}
-	if len(raw) != 2 {
-		t.Fatalf("expected exactly 2 fields in the beat, got %d: %v", len(raw), raw)
+	if len(raw) != 1 {
+		t.Fatalf("expected exactly 1 field in the beat, got %d: %v", len(raw), raw)
 	}
 }
 

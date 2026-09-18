@@ -278,14 +278,11 @@ func (t *Tailer) flushCompleteLines(ctx context.Context, buf *bytes.Buffer) {
 // appendEvent serializes line into a LogEvent and adds it to the pending batch.
 func (t *Tailer) appendEvent(line string) {
 	event := model.LogEvent{
-		SystemID:   t.identity.System.ID,
-		SystemName: t.identity.System.Name,
-		ServerName: t.identity.Server.Name,
-		ServerIP:   t.identity.Server.IP,
-		Path:       t.path,
-		Channel:    t.channel,
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Message:    line,
+		ServerID:  t.identity.ServerID,
+		Path:      t.path,
+		Channel:   t.channel,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Message:   line,
 	}
 
 	payload, err := json.Marshal(event)
