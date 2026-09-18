@@ -1,9 +1,37 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
+
+// StartupDelay is how long every collector waits before its first event, so
+// they all publish together on startup instead of one per interval boundary.
+// The resources collector spends it taking the baseline reading its rates are
+// differenced against, so the wait costs nothing there.
+const StartupDelay = time.Second
+
+// WaitForStartup blocks until the startup delay has passed, or until the
+// collector's own interval has, whichever is shorter — a sub-second interval
+// is not slowed down to wait for it. It reports false when ctx was cancelled
+// first, meaning the caller should return without publishing rather than hold
+// shutdown open.
+func WaitForStartup(ctx context.Context, interval time.Duration) bool {
+	wait := StartupDelay
+	if interval < wait {
+		wait = interval
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 
 type AppConfig struct {
 	Redis     RedisConfig     `json:"redis"`

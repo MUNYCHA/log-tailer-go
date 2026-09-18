@@ -299,3 +299,23 @@ func TestMountUsage_FailureLoggedOncePerState(t *testing.T) {
 		t.Fatalf("expected a new failure log after failing again, got %d", n)
 	}
 }
+
+func TestCollector_PublishesOnStartWithoutWaitingTheInterval(t *testing.T) {
+	pub := &fakePublisher{}
+	// An interval far longer than the test: anything published can only be
+	// the collect that runs before the ticker's first tick.
+	c := New([]string{"/"}, "storage-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), config.StartupDelay+300*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	events := pub.events(t)
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one event before the first tick, got %d", len(events))
+	}
+	// Nothing in storage is differenced between ticks, so it is complete
+	if len(events[0].Mounts) != 1 || events[0].Mounts[0].DiskUsage == nil {
+		t.Fatalf("expected the first event to be complete, got %+v", events[0].Mounts)
+	}
+}

@@ -59,6 +59,15 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	// Read the differenced metrics first, so the startup delay doubles as
+	// the window they are measured over and the first event is complete
+	// rather than missing cpu.usedPercent and network until the next tick.
+	c.primeRates()
+	if !config.WaitForStartup(ctx, c.interval) {
+		return
+	}
+	c.collectAndPublish(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -67,6 +76,19 @@ func (c *Collector) Run(ctx context.Context) {
 			c.collectAndPublish(ctx)
 		}
 	}
+}
+
+// primeRates takes the first reading of the differenced metrics, so the event
+// published after the startup delay has something to difference against.
+// Nothing is published here, and the reading is stored by the same code paths
+// the ticker uses rather than a second copy of them.
+//
+// A reading that fails is not retried: the first event then omits those
+// fields, exactly as it did before there was a baseline.
+func (c *Collector) primeRates() {
+	var discard model.CPUGroup
+	c.addCPUStat(&discard)
+	c.networkGroup()
 }
 
 func (c *Collector) collectAndPublish(ctx context.Context) {

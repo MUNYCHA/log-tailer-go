@@ -62,6 +62,14 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	// Publish once after the startup delay, then on the interval, so a
+	// restarted agent reports at once instead of after a whole interval of
+	// silence, and does it in step with the other collectors.
+	if !config.WaitForStartup(ctx, c.interval) {
+		return
+	}
+	c.collectAndPublish(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
