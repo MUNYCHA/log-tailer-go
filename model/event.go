@@ -147,7 +147,7 @@ type DockerEvent struct {
 // DockerContainer is one container. State is Docker's own: running, paused,
 // restarting, exited, created, removing or dead. Running and paused
 // containers also carry stats, the same figures docker stats shows; every
-// other state carries only its metadata.
+// other state carries how it last exited instead.
 type DockerContainer struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
@@ -162,6 +162,12 @@ type DockerContainer struct {
 	Network    *DockerNetwork `json:"network,omitempty"`
 	BlockIO    *DockerBlockIO `json:"blockIO,omitempty"`
 	PIDs       *uint64        `json:"pids,omitempty"`
+
+	// How a stopped container last exited. Omitted for running containers,
+	// for containers never started, and for one that started again while the
+	// round was being read.
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"` // RFC 3339, UTC
 
 	// Set when this container's stats could not be read; its metadata is
 	// still published

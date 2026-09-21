@@ -1,8 +1,9 @@
 // Package docker publishes every container on the server per interval:
-// metadata for all of them, and docker stats figures for the running ones.
+// metadata for all of them, docker stats figures for the running ones, and
+// the last exit code and time for the stopped ones.
 //
-// The collector here only orchestrates. The containers, stats and cgroup
-// subpackages have the same steps as every metric — read.go touches the
+// The collector here only orchestrates. The containers, stats, state and
+// cgroup subpackages have the same steps as every metric — read.go touches the
 // server, parse.go turns the raw reply into values, calculate.go turns values
 // into what is published — so this file never talks to Docker or reshapes
 // data itself. Every request goes through docker/client, which refuses
@@ -12,6 +13,7 @@ package docker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"log-tailer-go/docker/cgroup"
 	"log-tailer-go/docker/client"
 	"log-tailer-go/docker/containers"
+	"log-tailer-go/docker/state"
 	"log-tailer-go/docker/stats"
 	"log-tailer-go/model"
 )
@@ -29,9 +32,27 @@ import (
 // rather than a collector stuck forever.
 const requestTimeout = 5 * time.Second
 
-// maxParallel bounds concurrent stats requests, so a server with hundreds of
-// containers doesn't open hundreds of connections to the daemon at once.
+// maxParallel bounds concurrent requests of each kind — stats for running
+// containers, details for stopped ones — so a server with hundreds of
+// containers doesn't open hundreds of connections to the daemon at once. The
+// two kinds get separate slots, so stopped containers never queue ahead of
+// running containers' stats.
 const maxParallel = 8
+
+// A whole round is bounded too: a daemon that answers the list but hangs on
+// stats (a wedged containerd does this) would otherwise cost requestTimeout
+// per batch of containers. When the budget runs out, the containers still
+// waiting are published with an error and the event goes out on time. The
+// budget is the interval, capped at maxRound, and never under minRound so a
+// very short interval can't starve Docker of time to answer at all.
+const (
+	maxRound = 10 * time.Second
+	minRound = time.Second
+)
+
+// errTimedOut is published for a container whose request ran past its
+// timeout or the round budget.
+const errTimedOut = "timed out"
 
 // Publisher ships a batch of serialized events to a pub/sub channel in one
 // pipelined round trip, returning how many were accepted.
@@ -55,27 +76,33 @@ type Collector struct {
 	// when it clears rather than on every tick.
 	cgroupVersion int
 	failing       bool
+	roundBudget   time.Duration
 
 	// prevStats is each running container's previous sample, differenced
-	// against the next tick for CPU %. statsFailing holds containers whose
-	// stats failed last tick, logged once when it starts and once when it
-	// clears. Both are keyed by container id and pruned to the containers
-	// still running.
-	prevStats    map[string]stats.Sample
-	statsFailing map[string]bool
+	// against the next tick for CPU %, pruned to the containers still
+	// running. detailsFailing holds containers whose stats or details failed
+	// last tick, logged once when it starts and once when it clears, pruned
+	// to the containers still listed. Both are keyed by container id.
+	prevStats      map[string]stats.Sample
+	detailsFailing map[string]bool
 }
 
 func New(socketPath, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
 	return &Collector{
-		socketPath:   socketPath,
-		channel:      channel,
-		identity:     identity,
-		interval:     interval,
-		publisher:    publisher,
-		client:       client.New(socketPath),
-		prevStats:    make(map[string]stats.Sample),
-		statsFailing: make(map[string]bool),
+		socketPath:     socketPath,
+		channel:        channel,
+		identity:       identity,
+		interval:       interval,
+		publisher:      publisher,
+		client:         client.New(socketPath),
+		roundBudget:    roundBudget(interval),
+		prevStats:      make(map[string]stats.Sample),
+		detailsFailing: make(map[string]bool),
 	}
+}
+
+func roundBudget(interval time.Duration) time.Duration {
+	return max(minRound, min(interval, maxRound))
 }
 
 // Run lists every container each interval and publishes one event per tick.
@@ -111,11 +138,14 @@ func (c *Collector) Run(ctx context.Context) {
 // published here, and the reading is stored by the same code the ticker
 // uses. Docker being down is left for the first tick to report.
 func (c *Collector) primeCPU(ctx context.Context) {
-	list, err := c.readContainers(ctx)
+	round, cancel := context.WithTimeout(ctx, c.roundBudget)
+	defer cancel()
+
+	list, err := c.readContainers(round)
 	if err != nil {
 		return
 	}
-	c.withStats(ctx, list)
+	c.withDetails(round, list)
 }
 
 func (c *Collector) collectAndPublish(ctx context.Context) {
@@ -125,7 +155,10 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 		Containers: []model.DockerContainer{},
 	}
 
-	list, err := c.readContainers(ctx)
+	round, cancel := context.WithTimeout(ctx, c.roundBudget)
+	defer cancel()
+
+	list, err := c.readContainers(round)
 	if err != nil {
 		// Shutdown cancels the request mid-flight; that is not Docker failing
 		if ctx.Err() != nil {
@@ -135,15 +168,15 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 			slog.Warn("Failed to read docker containers, publishing the error", "socket", c.socketPath, "error", err)
 			c.failing = true
 		}
-		event.Error = err.Error()
+		event.Error = errorText(err)
 	} else {
 		if c.failing {
 			slog.Info("Docker readable again", "socket", c.socketPath)
 			c.failing = false
 		}
-		c.readCgroupVersion(ctx)
-		event.Containers = c.withStats(ctx, list)
-		// Shutdown mid-round leaves stats half read; publish nothing rather
+		c.readCgroupVersion(round)
+		event.Containers = c.withDetails(round, list)
+		// Shutdown mid-round leaves details half read; publish nothing rather
 		// than containers wrongly marked as failing
 		if ctx.Err() != nil {
 			return
@@ -166,74 +199,106 @@ func hasStats(state string) bool {
 	return state == "running" || state == "paused"
 }
 
-// withStats turns the container list into published containers, reading
-// stats for the running ones in parallel.
-func (c *Collector) withStats(ctx context.Context, list []containers.Container) []model.DockerContainer {
+// withDetails turns the container list into published containers, reading
+// stats for the running ones and last-exit details for the rest, in
+// parallel. A stopped container's details are read every round rather than
+// cached: one that starts and stops again between two rounds keeps its id
+// and state, and only a fresh read shows its new exit code.
+func (c *Collector) withDetails(ctx context.Context, list []containers.Container) []model.DockerContainer {
 	type result struct {
 		sample stats.Sample
+		exit   state.Sample
 		err    error
 	}
 	results := make([]result, len(list))
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxParallel)
+	statsSlots := make(chan struct{}, maxParallel)
+	detailSlots := make(chan struct{}, maxParallel)
 	for i, ct := range list {
-		if !hasStats(ct.State) {
-			continue
+		slots := detailSlots
+		if hasStats(ct.State) {
+			slots = statsSlots
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[i].sample, results[i].err = c.readStats(ctx, ct.ID)
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				results[i].err = ctx.Err()
+				return
+			}
+			defer func() { <-slots }()
+			if hasStats(ct.State) {
+				results[i].sample, results[i].err = c.readStats(ctx, ct.ID)
+			} else {
+				results[i].exit, results[i].err = c.readState(ctx, ct.ID)
+			}
 		}()
 	}
 	wg.Wait()
 
 	out := make([]model.DockerContainer, len(list))
-	seen := make(map[string]bool)
+	listed := make(map[string]bool)
+	running := make(map[string]bool)
 	for i, ct := range list {
 		out[i] = model.DockerContainer{ID: ct.ID, Name: ct.Name, Image: ct.Image, State: ct.State}
-		if !hasStats(ct.State) {
-			continue
-		}
-		seen[ct.ID] = true
+		listed[ct.ID] = true
 
 		r := results[i]
 		if r.err != nil {
-			if !c.statsFailing[ct.ID] {
-				slog.Warn("Failed to read container stats, publishing metadata only", "container", ct.Name, "error", r.err)
-				c.statsFailing[ct.ID] = true
+			if !c.detailsFailing[ct.ID] {
+				slog.Warn("Failed to read container details, publishing metadata only", "container", ct.Name, "state", ct.State, "error", r.err)
+				c.detailsFailing[ct.ID] = true
 			}
-			out[i].Error = r.err.Error()
-			delete(c.prevStats, ct.ID)
+			out[i].Error = errorText(r.err)
 			continue
 		}
-		if c.statsFailing[ct.ID] {
-			slog.Info("Container stats readable again", "container", ct.Name)
-			delete(c.statsFailing, ct.ID)
+		if c.detailsFailing[ct.ID] {
+			slog.Info("Container details readable again", "container", ct.Name)
+			delete(c.detailsFailing, ct.ID)
+		}
+
+		if !hasStats(ct.State) {
+			if e, ok := state.Exit(r.exit); ok {
+				code := e.ExitCode
+				out[i].ExitCode = &code
+				out[i].FinishedAt = e.FinishedAt
+			}
+			continue
 		}
 		// Stopped between the list and the stats request; the next tick
 		// lists it with its new state
 		if !r.sample.Running {
-			delete(c.prevStats, ct.ID)
 			continue
 		}
+		running[ct.ID] = true
 		c.fillStats(&out[i], r.sample)
 	}
 
+	// A container missing from running this tick starts CPU afresh next
+	// time, so a failed read or a restart never differences across a gap
 	for id := range c.prevStats {
-		if !seen[id] {
+		if !running[id] {
 			delete(c.prevStats, id)
 		}
 	}
-	for id := range c.statsFailing {
-		if !seen[id] {
-			delete(c.statsFailing, id)
+	for id := range c.detailsFailing {
+		if !listed[id] {
+			delete(c.detailsFailing, id)
 		}
 	}
 	return out
+}
+
+// errorText is the published error for a failed request: a plain
+// "timed out" for any deadline, rather than Go's full request error.
+func errorText(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errTimedOut
+	}
+	return err.Error()
 }
 
 // fillStats copies one sample onto a published container, differencing CPU
@@ -268,6 +333,17 @@ func (c *Collector) readStats(ctx context.Context, id string) (stats.Sample, err
 		return stats.Sample{}, err
 	}
 	return stats.Parse(data)
+}
+
+func (c *Collector) readState(ctx context.Context, id string) (state.Sample, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	data, err := state.Read(ctx, c.client, id)
+	if err != nil {
+		return state.Sample{}, err
+	}
+	return state.Parse(data)
 }
 
 func (c *Collector) readContainers(ctx context.Context) ([]containers.Container, error) {
