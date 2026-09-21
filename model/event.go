@@ -145,10 +145,48 @@ type DockerEvent struct {
 }
 
 // DockerContainer is one container. State is Docker's own: running, paused,
-// restarting, exited, created, removing or dead.
+// restarting, exited, created, removing or dead. Running and paused
+// containers also carry stats, the same figures docker stats shows; every
+// other state carries only its metadata.
 type DockerContainer struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Image string `json:"image"`
 	State string `json:"state"`
+
+	// Share of one CPU core, like docker stats: two busy cores read 200.
+	// Averaged since the previous tick, so omitted on the first tick a
+	// container is seen and after it restarts.
+	CPUPercent *float64       `json:"cpuPercent,omitempty"`
+	Memory     *DockerMemory  `json:"memory,omitempty"`
+	Network    *DockerNetwork `json:"network,omitempty"`
+	BlockIO    *DockerBlockIO `json:"blockIO,omitempty"`
+	PIDs       *uint64        `json:"pids,omitempty"`
+
+	// Set when this container's stats could not be read; its metadata is
+	// still published
+	Error string `json:"error,omitempty"`
+}
+
+// DockerMemory is used memory without the page cache, as docker stats
+// shows it. With no memory limit set, LimitBytes is the host's memory.
+type DockerMemory struct {
+	UsedBytes   uint64  `json:"usedBytes"`
+	LimitBytes  uint64  `json:"limitBytes"`
+	UsedPercent float64 `json:"usedPercent"`
+}
+
+// DockerNetwork is bytes received and sent since the container started,
+// summed over its networks. Omitted for host or none networking.
+type DockerNetwork struct {
+	RxBytes uint64 `json:"rxBytes"`
+	TxBytes uint64 `json:"txBytes"`
+}
+
+// DockerBlockIO is bytes read from and written to disk since the container
+// started. On cgroupVersion 1, buffered writes are not counted, so
+// WriteBytes often reads 0.
+type DockerBlockIO struct {
+	ReadBytes  uint64 `json:"readBytes"`
+	WriteBytes uint64 `json:"writeBytes"`
 }
