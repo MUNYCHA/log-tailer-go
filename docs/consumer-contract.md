@@ -24,8 +24,8 @@ guaranteed to be there.
    is present. There is no half-filled group.
 6. **Lists are always present**, as `[]` when empty. Never `null`, never
    absent.
-7. **The interval-driven events — `resources`, `storage` and `heartbeat` —
-   publish once a second after startup**, then on their own intervals. A
+7. **The interval-driven events — `resources`, `storage`, `docker` and
+   `heartbeat` — publish once a second after startup**, then on their own intervals. A
    consumer sees one event per channel right after an agent restart, out of
    step with the interval it was expecting and carrying no marker saying so.
    It is a complete event, but any rate in it is measured over that one second
@@ -39,7 +39,7 @@ Rules 2 and 8 are the two that cause real incidents. The rest are convenience.
 
 ## Identity
 
-Every `logs`, `resources` and `storage` event opens with the same two fields,
+Every `logs`, `resources`, `storage` and `docker` event opens with the same two fields,
 in the same order, always present:
 
 ```json
@@ -133,7 +133,8 @@ One event per interval. Everything below the identity fields is optional.
 }
 ```
 
-Percentages are unrounded floats in `[0, 100]`. Byte counts are whole bytes and
+Percentages are unrounded floats in `[0, 100]` (the docker event's
+`cpuPercent` is the exception — see [docker](#docker)). Byte counts are whole bytes and
 can exceed 2³¹, so a 32-bit integer type is not enough. `rxBytesPerSec` and
 `txBytesPerSec` are means over the interval just ended, not instantaneous.
 
@@ -334,6 +335,132 @@ there as an empty list — it is a list, and lists are always present.
 `mounts` itself is never absent and never `null`: `[]` when no mounts are
 configured. `mounts[].path` is never absent.
 
+## docker
+
+One event per interval listing every container on the server, running or not,
+sorted by `name`. Running and paused containers carry stats; every other state
+carries how it last exited.
+
+### Normal
+
+```json
+{
+  "serverId": "your-server-id",
+  "timestamp": "2026-09-21T08:40:00Z",
+  "cgroupVersion": 2,
+  "containers": [
+    {
+      "id": "fa5eb4ae064f7908a3a6ed36514e5c97b1d56e05274daccbe6d84cfbb51ec338",
+      "name": "mysql-mysql-1",
+      "image": "mysql:8",
+      "state": "exited",
+      "exitCode": 255,
+      "finishedAt": "2026-09-11T02:39:19Z"
+    },
+    {
+      "id": "190a28d8ed2ac9890a44c6d69aee47fd4d5dde9b75f375d165afa3eadadc18cc",
+      "name": "redis-redis-1",
+      "image": "redis:8-alpine",
+      "state": "running",
+      "cpuPercent": 0.15313115399763685,
+      "memory": { "usedBytes": 10194944, "limitBytes": 16466882560, "usedPercent": 0.0619118036632187 },
+      "network": { "rxBytes": 3160697, "txBytes": 358542 },
+      "blockIO": { "readBytes": 35926016, "writeBytes": 0 },
+      "pids": 22
+    }
+  ]
+}
+```
+
+`id`, `name`, `image` and `state` are always present on every container.
+Branch on `state`, not on which keys happen to be there: `running` and
+`paused` are the states that get stats, every other state gets `exitCode` and
+`finishedAt`. `state` is Docker's own vocabulary and a future Docker could add
+a value, so treat an unknown state as "not running".
+
+Three values differ from the `resources` event and are easy to misread:
+
+- **`cpuPercent` is not capped at 100.** It is a share of one core, like
+  `docker stats`: a container busy on two cores reads `200`, and the ceiling
+  is 100 × the host's CPU count. Do not chart it on a 0–100 axis next to
+  `resources.cpu.usedPercent`, which is a share of the whole machine.
+- **`network` and `blockIO` are totals since the container started**, not
+  rates. They reset to `0` when the container restarts. To chart a rate,
+  difference two events and treat a drop as a restart, not negative traffic.
+- **`memory.limitBytes` is the host's memory** when the container has no
+  limit, so `usedPercent` is then a share of the host.
+
+### Block I/O and `cgroupVersion`
+
+`cgroupVersion` says which kernel accounting Docker's counters come from. It
+matters for one field. On `1`, buffered writes are flushed to disk by a kernel
+thread and charged to that thread rather than the container, so
+`blockIO.writeBytes` **may be undercounted**, often down to `0`. On `2` they
+are charged to the container.
+
+| `cgroupVersion` | `writeBytes: 0` means |
+|---|---|
+| `2` | the container wrote nothing to disk |
+| `1` | it wrote nothing, **or** its writes were not attributed to it — show it as "may be undercounted", not as a confident zero |
+| absent | not known yet — Docker has not answered once since the agent started |
+
+Compare `writeBytes` only between servers with the same `cgroupVersion`.
+Every other field is comparable across all servers.
+
+### Docker unreachable
+
+Docker not installed, its socket missing, or the daemon down:
+
+```json
+{
+  "serverId": "your-server-id",
+  "timestamp": "2026-09-21T08:40:00Z",
+  "containers": [],
+  "error": "Get \"http://docker/containers/json?all=true\": dial unix /var/run/docker.sock: connect: no such file or directory"
+}
+```
+
+**Check `error` before reading an empty `containers` list.** Without `error`,
+`[]` means the server really has no containers; with it, the agent could not
+see them. A dashboard that skips this check shows every container on a server
+vanishing whenever the daemon restarts. The event still arrives, so a missing
+docker event means the agent is down, never Docker.
+
+### One container failing
+
+A container whose stats or details could not be read keeps its metadata and
+carries `error` instead of its stats or exit fields:
+
+```json
+{ "id": "…", "name": "api", "image": "api:1.4", "state": "running", "error": "timed out" }
+```
+
+`"timed out"` means the request, or the whole round, ran out of time: a round
+is cut off at the interval, capped at 10 seconds, so a daemon that answers the
+list but hangs on stats still gets its event published on time. Any other
+`error` is Docker's own message.
+
+A running container with neither stats nor `error` stopped between the list
+and its stats request; the next event shows its new state.
+
+### What can be absent
+
+| Key | Absent when |
+|---|---|
+| `cgroupVersion` | Docker has not answered `/info` since the agent started |
+| `error` (event) | the container list was read |
+| `containers[].cpuPercent` | the first round a container is seen after startup, the round after it restarts, or Docker reports no CPU count |
+| `containers[].memory` | Docker sent no memory figures for it |
+| `containers[].network` | the container uses host or no networking |
+| `containers[].blockIO` | not running, or its stats failed |
+| `containers[].pids` | Docker too old to report it |
+| `containers[].exitCode`, `finishedAt` | running or paused, never started, started again mid-round, or its details failed — always together |
+| `containers[].error` | its stats or details were read |
+| every stats field above | the container is not running or paused, stopped mid-round, or has `error` |
+
+`exitCode` `0` is a clean exit and is published; only a never-started
+container omits it. `finishedAt` is RFC 3339 UTC like `timestamp`.
+
 ## Mapping this in any language
 
 The single rule is **absent is a valid value, not a parse error**, and it must
@@ -364,8 +491,9 @@ usedPercent declared as a float          → absent becomes 0.0 → a busy CPU
 So: **every optional scalar needs a type that can hold "no value"** — nullable,
 boxed, `Option`, or a sentinel you check explicitly. Use a plain primitive only
 for the fields listed as always present: `serverId`, `timestamp`,
-`partial`, `path`, and the numbers *inside* a group, which are guaranteed
-whenever the group itself is there.
+`partial`, `path`, a container's `id`, `name`, `image` and `state`, and the
+numbers *inside* a group, which are guaranteed whenever the group itself is
+there.
 
 **Ignore unknown keys.** Fields get added to these events — `missingPaths` was
 added after the first release. A strict decoder that rejects unrecognised keys
