@@ -71,17 +71,26 @@ func statsReply(call int) string {
 }`, call*25_000, call*100_000)
 }
 
+// inspectReply is postgres's details; its exit code goes up by one per call,
+// the way a container that restarts and dies between rounds would look
+func inspectReply(call int) string {
+	return fmt.Sprintf(`{"State":{"Status":"exited","Running":false,"ExitCode":%d,
+  "FinishedAt":"2026-09-21T08:0%d:00.123Z"},"Config":{"Env":["POSTGRES_PASSWORD=secret"]}}`, 136+call, call%10)
+}
+
 // What Docker sends for a container that stopped after being listed
 const stoppedReply = `{"read":"0001-01-01T00:00:00Z","memory_stats":{},"pids_stats":{}}`
 
 // fakeDocker serves canned replies on a unix socket and records every
 // request that reaches it.
 type fakeDocker struct {
-	mu    sync.Mutex
-	seen  []string
-	info  string
-	list  string
-	calls int
+	mu       sync.Mutex
+	seen     []string
+	info     string
+	list     string
+	calls    int
+	inspects int
+	hang     chan struct{} // stats requests block on this when set
 }
 
 func (f *fakeDocker) requests() []string {
@@ -111,7 +120,20 @@ func startFakeDockerWithList(t *testing.T, info, list string) (*fakeDocker, stri
 			w.Write([]byte(f.info))
 		case "/containers/json":
 			w.Write([]byte(f.list))
+		case "/containers/" + postgresID + "/json":
+			f.mu.Lock()
+			f.inspects++
+			call := f.inspects
+			f.mu.Unlock()
+			w.Write([]byte(inspectReply(call)))
 		case "/containers/" + valkeyID + "/stats":
+			if f.hang != nil {
+				select {
+				case <-f.hang:
+				case <-r.Context().Done():
+				}
+				return
+			}
 			f.mu.Lock()
 			f.calls++
 			call := f.calls
@@ -167,17 +189,25 @@ func TestCollector_PublishesEveryContainerSorted(t *testing.T) {
 		t.Fatalf("expected 2 containers, got %+v", ev.Containers)
 	}
 
-	// Stopped: metadata only
+	// Stopped: metadata plus how it last exited, no stats
 	pg := ev.Containers[0]
-	wantPG := model.DockerContainer{ID: postgresID, Name: "postgres-postgres-1", Image: "postgres:16", State: "exited"}
-	if pg != wantPG {
-		t.Fatalf("expected %+v, got %+v", wantPG, pg)
+	if pg.ID != postgresID || pg.Name != "postgres-postgres-1" || pg.Image != "postgres:16" || pg.State != "exited" || pg.Error != "" {
+		t.Fatalf("expected postgres metadata and no error, got %+v", pg)
+	}
+	if pg.ExitCode == nil || pg.FinishedAt == "" {
+		t.Fatalf("expected exitCode and finishedAt on a stopped container, got %+v", pg)
+	}
+	if pg.CPUPercent != nil || pg.Memory != nil || pg.Network != nil || pg.BlockIO != nil || pg.PIDs != nil {
+		t.Fatalf("expected no stats on a stopped container, got %+v", pg)
 	}
 
 	// Running: metadata plus every docker stats figure
 	vk := ev.Containers[1]
 	if vk.ID != valkeyID || vk.Name != "valkey-valkey-1" || vk.Image != "valkey/valkey:8-alpine" || vk.State != "running" || vk.Error != "" {
 		t.Fatalf("expected valkey metadata and no error, got %+v", vk)
+	}
+	if vk.ExitCode != nil || vk.FinishedAt != "" {
+		t.Fatalf("expected no exit details on a running container, got %+v", vk)
 	}
 	// The startup baseline means CPU is there on the very first event
 	if vk.CPUPercent == nil || *vk.CPUPercent != 100 {
@@ -210,8 +240,8 @@ func TestCollector_OldDockerReportsCgroupV1(t *testing.T) {
 }
 
 // Across many ticks the collector only lists containers, reads stats for the
-// running one, and asks /info once; nothing else reaches Docker, and a
-// stopped container's stats are never requested
+// running one and details for the stopped one, and asks /info once; nothing
+// else reaches Docker, and a stopped container's stats are never requested
 func TestCollector_SendsOnlyTheExpectedRequests(t *testing.T) {
 	f, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
 	pub := &fakePublisher{}
@@ -228,6 +258,7 @@ func TestCollector_SendsOnlyTheExpectedRequests(t *testing.T) {
 			infos++
 		case "GET /containers/json?all=true":
 		case "GET /containers/" + valkeyID + "/stats?stream=false&one-shot=true":
+		case "GET /containers/" + postgresID + "/json":
 		default:
 			t.Fatalf("unexpected request reached docker: %s", r)
 		}
@@ -319,6 +350,73 @@ func TestHasStats(t *testing.T) {
 	} {
 		if got := hasStats(state); got != want {
 			t.Errorf("hasStats(%q) = %v, want %v", state, got, want)
+		}
+	}
+}
+
+// A stopped container's details are read fresh every round, never cached:
+// one that restarted and died again between rounds shows its new exit code
+func TestCollector_StoppedDetailsReadEveryRound(t *testing.T) {
+	_, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
+	pub := &fakePublisher{}
+	run(t, socket, pub, 60*time.Millisecond)
+
+	events := pub.events(t)
+	if len(events) < 2 {
+		t.Fatalf("expected several events, got %d", len(events))
+	}
+	first, second := events[0].Containers[0], events[1].Containers[0]
+	if first.ExitCode == nil || second.ExitCode == nil {
+		t.Fatalf("expected exit codes on both events, got %+v / %+v", first, second)
+	}
+	if *first.ExitCode == *second.ExitCode {
+		t.Fatalf("expected a fresh exit code each round, got %d twice", *first.ExitCode)
+	}
+	if first.FinishedAt != "2026-09-21T08:02:00Z" {
+		t.Fatalf("expected finishedAt in RFC 3339 UTC, got %q", first.FinishedAt)
+	}
+}
+
+// A daemon that lists containers but hangs on stats costs one round budget,
+// not a request timeout per batch: the event still goes out, with the stuck
+// container marked timed out and the stopped one's details intact
+func TestCollector_RoundBudgetBoundsAHungDaemon(t *testing.T) {
+	f, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
+	f.hang = make(chan struct{})
+	defer close(f.hang)
+
+	pub := &fakePublisher{}
+	c := New(socket, "docker-channel", config.IdentityConfig{ServerID: "server-1"}, time.Hour, pub)
+	c.roundBudget = 100 * time.Millisecond
+
+	start := time.Now()
+	c.collectAndPublish(context.Background())
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("expected the round cut off near its 100ms budget, took %v", took)
+	}
+
+	events := pub.events(t)
+	if len(events) != 1 {
+		t.Fatalf("expected one event, got %d", len(events))
+	}
+	cs := events[0].Containers
+	if cs[1].Name != "valkey-valkey-1" || cs[1].Error != "timed out" || cs[1].Memory != nil {
+		t.Fatalf("expected valkey published as timed out without stats, got %+v", cs[1])
+	}
+	if cs[0].Name != "postgres-postgres-1" || cs[0].ExitCode == nil || cs[0].Error != "" {
+		t.Fatalf("expected postgres details unaffected by the hung stats, got %+v", cs[0])
+	}
+}
+
+func TestRoundBudget(t *testing.T) {
+	cases := map[time.Duration]time.Duration{
+		10 * time.Millisecond: time.Second,      // floor: Docker gets a chance to answer
+		5 * time.Second:       5 * time.Second,  // the interval
+		30 * time.Second:      10 * time.Second, // capped
+	}
+	for interval, want := range cases {
+		if got := roundBudget(interval); got != want {
+			t.Errorf("roundBudget(%v) = %v, want %v", interval, got, want)
 		}
 	}
 }
