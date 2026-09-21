@@ -40,6 +40,7 @@ type AppConfig struct {
 	Resources ResourcesConfig `json:"resources"`
 	Storage   StorageConfig   `json:"storage"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
+	Docker    DockerConfig    `json:"docker"`
 }
 
 type RedisConfig struct {
@@ -83,6 +84,15 @@ type StorageConfig struct {
 	Channel  string   `json:"channel"`
 	Interval string   `json:"interval"` // e.g. "5m" — parsed with time.ParseDuration
 	Mounts   []string `json:"mounts"`
+}
+
+// DockerConfig gates the docker event: every container on the server, read
+// read-only from the Docker socket. There is no container list to configure;
+// the event reports whatever Docker has.
+type DockerConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Channel  string `json:"channel"`
+	Interval string `json:"interval"` // e.g. "30s" — parsed with time.ParseDuration
 }
 
 // HeartbeatConfig gates the liveness beat. Enabled is a pointer so an omitted
@@ -161,6 +171,14 @@ func (c *AppConfig) Validate() error {
 			if m == "" {
 				return fmt.Errorf("each 'storage.mounts' entry must be non-empty")
 			}
+		}
+	}
+	if c.Docker.Enabled {
+		if c.Docker.Channel == "" {
+			return fmt.Errorf("'docker.channel' is required")
+		}
+		if d, err := time.ParseDuration(c.Docker.Interval); err != nil || d <= 0 {
+			return fmt.Errorf("'docker.interval' must be a positive duration (e.g. \"30s\")")
 		}
 	}
 	if c.Heartbeat.IsEnabled() {

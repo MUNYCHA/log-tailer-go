@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/docker"
+	"log-tailer-go/docker/client"
 	"log-tailer-go/heartbeat"
 	"log-tailer-go/logs"
 	"log-tailer-go/redis"
@@ -36,7 +38,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !cfg.LogTailer.Enabled && !cfg.Resources.Enabled && !cfg.Storage.Enabled && !cfg.Heartbeat.IsEnabled() {
+	if !cfg.LogTailer.Enabled && !cfg.Resources.Enabled && !cfg.Storage.Enabled && !cfg.Docker.Enabled && !cfg.Heartbeat.IsEnabled() {
 		slog.Error("No component is enabled in config, nothing to do")
 		os.Exit(1)
 	}
@@ -55,6 +57,15 @@ func main() {
 		storageInterval, err = time.ParseDuration(cfg.Storage.Interval)
 		if err != nil {
 			slog.Error("Failed to parse storage.interval", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	var dockerInterval time.Duration
+	if cfg.Docker.Enabled {
+		dockerInterval, err = time.ParseDuration(cfg.Docker.Interval)
+		if err != nil {
+			slog.Error("Failed to parse docker.interval", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -101,6 +112,14 @@ func main() {
 	if cfg.Storage.Enabled {
 		runSupervised(ctx, &wg, "storage", func(ctx context.Context) {
 			storage.New(cfg.Storage.Mounts, cfg.Storage.Channel, cfg.Identity, storageInterval, publisher).Run(ctx)
+		})
+	}
+
+	// Supervised separately on purpose: a slow or hung Docker daemon only
+	// delays the docker event, never the other collectors or the beat
+	if cfg.Docker.Enabled {
+		runSupervised(ctx, &wg, "docker", func(ctx context.Context) {
+			docker.New(client.SocketPath, cfg.Docker.Channel, cfg.Identity, dockerInterval, publisher).Run(ctx)
 		})
 	}
 
