@@ -9,7 +9,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Publishes each line as a JSON event to a Redis Pub/Sub channel
 - Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
 - Bursts are published as pipelined batches (one round trip per 64 KB read chunk), sustaining 50k+ lines/s per file while staying synchronous — no internal queues
-- Every component — each per-file tailer, the resources and storage collectors, and the heartbeat — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
+- Every component — each per-file tailer, the resources, storage and docker collectors, and the heartbeat — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
 - Each tailer logs a liveness line to the journal every 5 minutes with its lines-shipped count — silent zero-shipping is visible without a subscriber (this is a journal log, unrelated to the `agent-heartbeat` channel below)
 - Waits for Redis at startup — retries every 5 s instead of exiting, so it also self-heals when run without systemd
 - Auto-reconnects if Redis goes down mid-run; publish failures are logged with throttling and memory stays flat (nothing is buffered)
@@ -18,8 +18,9 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Config file may be JSON or YAML, auto-detected by extension
 - Optional resources collector publishes server uptime, load average, CPU utilisation, memory/swap and network throughput as one JSON event on its own timer
 - Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
+- Optional docker collector publishes every container on the server as one JSON event: the `docker stats` figures (CPU, memory, network, block I/O, PIDs) for running containers and the last exit code and time for stopped ones. It is strictly read-only: every request to the Docker socket passes an allow-list that only lets four `GET`s through, so the agent can never stop, remove or exec into a container
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collectors, so a wedged storage read can't make a healthy server look down
-- The resources, storage and heartbeat events all publish one second after start and then on their own intervals, so a restarted agent reports at once instead of after a whole interval of silence
+- The resources, storage, docker and heartbeat events all publish one second after start and then on their own intervals, so a restarted agent reports at once instead of after a whole interval of silence
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Requirements
@@ -32,6 +33,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - **Tested on kernel 6.6.** Older kernels are covered by the documented, append-only `/proc` formats, not by direct testing
 - **Go 1.25+** to build (`go.mod`); the resulting binary has no runtime dependencies
 - **Redis** reachable from the server (Pub/Sub only, no persistence needed)
+- **Docker** only for the optional docker collector: the agent must be able to open `/var/run/docker.sock`, so it runs as root or as a member of the `docker` group. Any Docker from 1.13 (2017) on is expected to work, through the API's backward compatibility; **tested on Docker 29.6**. Older daemons that lack a field (such as the PID count) have it omitted
 
 ## Project Structure
 
@@ -66,6 +68,15 @@ log-tailer-go/
 │   ├── collector_test.go
 │   ├── mounts/          — /proc/self/mounts → device, fsType, local or network per path; unique local filesystems
 │   └── disk/            — statfs → total/used/free/reserved bytes, used %; server-wide total
+├── docker/
+│   ├── collector.go     — every interval: lists containers, reads stats for running ones and
+│   │                      last-exit details for stopped ones in parallel, publishes one docker event
+│   ├── collector_test.go
+│   ├── client/          — read-only Docker socket client; the allow-list guard every request passes
+│   ├── containers/      — GET /containers/json?all=true → id, name, image, state of every container
+│   ├── stats/           — GET /containers/{id}/stats → cpu, memory, network, block I/O, pids
+│   ├── state/           — GET /containers/{id}/json → last exit code and finish time
+│   └── cgroup/          — GET /info → the cgroup version behind Docker's counters
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
@@ -75,11 +86,11 @@ log-tailer-go/
     └── consumer-contract.md  — what a subscriber can rely on in every event
 ```
 
-Every metric folder under `resources/` and `storage/` has the same four files, one job each:
+Every metric folder under `resources/`, `storage/` and `docker/` has the same four files, one job each (`docker/cgroup/` has nothing to calculate, and `docker/client/` is the socket client they all read through):
 
 | File | Job | Touches the server? |
 |---|---|---|
-| `read.go` | Gets raw data from Linux (`/proc`, `/sys`, `statfs`) | Yes — the only file that does |
+| `read.go` | Gets raw data from Linux (`/proc`, `/sys`, `statfs`) or the Docker API | Yes — the only file that does |
 | `parse.go` | Turns the raw data into plain numbers | No |
 | `calculate.go` | Turns those numbers into the published values (bytes, %, rates) | No |
 | `<name>_test.go` | Tests parsing and calculation with fake input | No |
@@ -284,6 +295,80 @@ A path that is an empty mount point with nothing mounted on it reports the files
 
 Storage runs as its own component, separate from resources, so a `statfs` stuck on a dead mount only delays the storage event — CPU, memory and the heartbeat keep publishing.
 
+### Docker
+
+When `docker.enabled` is `true`, every container on the server is published to `docker.channel` a second after startup and then every `docker.interval`, sorted by name. Running containers carry the same figures as `docker stats`; stopped ones carry how they last exited:
+
+```json
+{
+  "serverId": "your-server-id",
+  "timestamp": "2026-09-21T08:40:00Z",
+  "cgroupVersion": 2,
+  "containers": [
+    {
+      "id": "fa5eb4ae064f7908a3a6ed36514e5c97b1d56e05274daccbe6d84cfbb51ec338",
+      "name": "mysql-mysql-1",
+      "image": "mysql:8",
+      "state": "exited",
+      "exitCode": 255,
+      "finishedAt": "2026-09-11T02:39:19Z"
+    },
+    {
+      "id": "190a28d8ed2ac9890a44c6d69aee47fd4d5dde9b75f375d165afa3eadadc18cc",
+      "name": "redis-redis-1",
+      "image": "redis:8-alpine",
+      "state": "running",
+      "cpuPercent": 0.15,
+      "memory": { "usedBytes": 10194944, "limitBytes": 16466882560, "usedPercent": 0.06 },
+      "network": { "rxBytes": 3160697, "txBytes": 358542 },
+      "blockIO": { "readBytes": 35926016, "writeBytes": 0 },
+      "pids": 22
+    }
+  ]
+}
+```
+
+| `docker stats` column | Field | Notes |
+|---|---|---|
+| CONTAINER ID | `id` | Full 64-character id; `docker ps` shows the first 12 |
+| NAME | `name` | Without Docker's leading `/` |
+| CPU % | `cpuPercent` | Share of one core: a container busy on two cores reads `200` |
+| MEM USAGE / LIMIT | `memory.usedBytes`, `memory.limitBytes` | Used excludes the inactive page cache, exactly as `docker stats` computes it. With no memory limit set, the limit is the host's memory |
+| MEM % | `memory.usedPercent` | `used / limit × 100` |
+| NET I/O | `network.rxBytes`, `network.txBytes` | Totals since the container started, summed over its networks — not rates |
+| BLOCK I/O | `blockIO.readBytes`, `blockIO.writeBytes` | Totals since the container started |
+| PIDS | `pids` | |
+
+`image` and `state` come from the container list at no extra cost. `state` is Docker's own: `running`, `paused`, `restarting`, `exited`, `created`, `removing` or `dead`. Running and paused containers get stats; every other state gets `exitCode` and `finishedAt` instead.
+
+**Where the numbers come from.** Everything is read through the Docker API; the agent never reads cgroup files itself. Only four requests are ever sent, all `GET`, the same reads as `docker info`, `docker ps -a`, `docker stats --no-stream` and `docker inspect`:
+
+| Request | Used for |
+|---|---|
+| `GET /info` | `cgroupVersion`, asked once |
+| `GET /containers/json?all=true` | the container list |
+| `GET /containers/{id}/stats?stream=false&one-shot=true` | stats of a running container |
+| `GET /containers/{id}/json` | last exit of a stopped container |
+
+The client in `docker/client/` refuses anything else before it reaches the socket — any other method, any other path, and any id that is not a full 64-hex id — and its tests check that stop, restart, kill, exec, delete, create, image pulls, logs, exports and path tricks are all refused. The agent runs as root, so this guard, not the unit's sandboxing, is what keeps it read-only. Only the fields listed above are decoded from Docker's replies: container command lines, environment variables and labels, which often hold passwords, never reach an event.
+
+**CPU %** uses the `docker stats` formula — the container's share of all host CPU time, times the number of CPUs — but is differenced against the agent's own previous reading, not Docker's, so it works the same on every Docker version. It is the mean over the interval, where `docker stats` shows about the last second, so short spikes are smoothed. A baseline taken at startup makes it present from the first event; it is omitted the first time a container is seen after that and on the round after the container restarts.
+
+**`cgroupVersion`** is the kernel cgroup version behind Docker's counters, read from Docker's `/info` (a daemon older than 20.10 has no such field and only ran on v1, so it reads `1`). It matters for one figure: on cgroup v1, buffered writes are flushed to disk by a kernel thread and charged to that thread, not the container, so `blockIO.writeBytes` **may be undercounted**, often down to `0`. On v2 they are charged to the container. Every other figure is comparable across servers; compare write bytes only between servers with the same `cgroupVersion`. A `0` on v1 can still be a genuine zero.
+
+**Stopped containers.** `exitCode` and `finishedAt` are read fresh every round rather than cached: a container that starts and dies again between two rounds keeps its id and state, and only a fresh read shows its new exit code. Both are omitted for a container that was created but never started (Docker's `0` there would read as a clean exit) and for one that started again while the round was being read.
+
+**When Docker misbehaves.** The collector is supervised separately, so nothing here can delay the other events:
+
+| Case | Published |
+|---|---|
+| Docker not installed, socket missing, daemon down | the event with `error` set and `containers: []`; logged once when it starts and once when it clears |
+| One container's stats or details fail | that container with its metadata and `error`, the rest unaffected |
+| A container stops between the list and its stats request | metadata only, no `error`; the next round shows its new state |
+| Docker lists containers but hangs on stats | the round is cut off at its budget — the interval, capped at 10s, never under 1s — and the containers still waiting carry `"error": "timed out"` |
+
+Each request is limited to 5 seconds and each reply to 8 MB, and at most 8 stats and 8 detail requests run at once, so a server with hundreds of containers never opens hundreds of connections to the daemon. A round on a typical server takes a few tens of milliseconds; on a daemon older than 20.10, which ignores `one-shot`, each stats request takes about a second, so a round takes about a second longer.
+
 ### Heartbeat
 
 When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — a second after startup and then every `heartbeat.interval`:
@@ -310,9 +395,9 @@ A value the agent cannot read is **left out of the JSON entirely** — never sen
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
-The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, and `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled, and `docker.channel` and a positive `docker.interval` when docker is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, no `docker`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
 
-Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All three wait the same second, so the first heartbeat, resources and storage events go out together. `resources` spends that second taking the baseline reading its rates are differenced against, so its first event is complete rather than missing `cpu.usedPercent` and `network`. An interval shorter than a second is not delayed by it.
+Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All four wait the same second, so the first heartbeat, resources, storage and docker events go out together. `resources` and `docker` spend that second taking the baseline reading their rates are differenced against, so their first events are complete rather than missing `cpu.usedPercent`, `network` and `cpuPercent`. An interval shorter than a second is not delayed by it.
 
 The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
@@ -339,6 +424,9 @@ cp config/config.example.yaml config/config.yaml
 | `storage.channel` | Redis Pub/Sub channel for storage events |
 | `storage.interval` | Collection interval, as a Go duration string (e.g. `"5m"`) |
 | `storage.mounts` | Optional list of mount paths to report disk usage for |
+| `docker.enabled` | Enable or disable the docker collector. There is no container list to configure: the event reports every container Docker has |
+| `docker.channel` | Redis Pub/Sub channel for docker events |
+| `docker.interval` | Collection interval, as a Go duration string (e.g. `"30s"`) |
 | `heartbeat.enabled` | Enable or disable the heartbeat (default `true` when the key or the whole block is omitted) |
 | `heartbeat.channel` | Channel beats are published to (default `"agent-heartbeat"`; an empty value falls back to it). Must match what the consumer subscribes to |
 | `heartbeat.interval` | Beat interval, as a Go duration string (default `"10s"`; must stay well under the consumer's TTL) |
@@ -372,7 +460,7 @@ There is no `--help` or `--version`; an unrecognized flag is ignored rather than
 
 ## Production Deployment (systemd)
 
-The unit file lives at [`deploy/log-tailer-go.service`](deploy/log-tailer-go.service). It expects the binary at `/opt/log-tailer-go/log-tailer-go` and the config at `/etc/log-tailer-go/config.json`; adjust `User=`/`Group=` to an account that can read your log files.
+The unit file lives at [`deploy/log-tailer-go.service`](deploy/log-tailer-go.service). It expects the binary at `/opt/log-tailer-go/log-tailer-go` and the config at `/etc/log-tailer-go/config.json`; adjust `User=`/`Group=` to an account that can read your log files and, with the docker collector enabled, open `/var/run/docker.sock` (root, or a member of the `docker` group).
 
 ```bash
 sudo mkdir -p /opt/log-tailer-go /etc/log-tailer-go
@@ -420,5 +508,6 @@ Do **not** add these settings, they hide data the agent reads:
 | `ProcSubset=pid` | hides `/proc/uptime`, `/proc/stat`, `/proc/loadavg`, `/proc/meminfo` and `/proc/net/dev`, so uptime, cpu, memory, swap and network are omitted |
 | `ProtectHome=yes` or `ProtectHome=tmpfs` | a separate `/home` disk disappears from the storage `server` total |
 | `InaccessiblePaths=` or `TemporaryFileSystem=` on a disk path | that disk is hidden from storage or reported as the wrong filesystem |
+| `InaccessiblePaths=/var/run/docker.sock`, or `RestrictAddressFamilies=` without `AF_UNIX` | Docker becomes unreachable and every docker event carries only `error` |
 
 > No JVM flags needed — Go binaries use only what they need.
