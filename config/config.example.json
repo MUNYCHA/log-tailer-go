@@ -30,6 +30,12 @@
     "mounts": ["/", "/var/log"]
   },
 
+  "docker": {
+    "enabled": true,
+    "channel": "your-docker-channel",
+    "interval": "30s"
+  },
+
   "heartbeat": {
     "enabled": true,
     "channel": "agent-heartbeat",

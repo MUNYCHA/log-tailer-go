@@ -123,3 +123,32 @@ type DiskUsage struct {
 type HeartbeatEvent struct {
 	ServerID string `json:"serverId"`
 }
+
+// DockerEvent is one snapshot of every container on the server, running or
+// not, sorted by name.
+type DockerEvent struct {
+	ServerID  string `json:"serverId"`
+	Timestamp string `json:"timestamp"`
+
+	// The kernel cgroup version behind Docker's per-container counters, 1 or
+	// 2. Omitted until Docker has answered once. On 1, block I/O write bytes
+	// miss buffered writes, so compare them only between servers on the
+	// same version.
+	CgroupVersion int `json:"cgroupVersion,omitempty"`
+
+	// Always present; empty when Error is set, so check Error before reading
+	// an empty list as "no containers"
+	Containers []DockerContainer `json:"containers"`
+
+	// Set when Docker could not be reached or its reply could not be read
+	Error string `json:"error,omitempty"`
+}
+
+// DockerContainer is one container. State is Docker's own: running, paused,
+// restarting, exited, created, removing or dead.
+type DockerContainer struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Image string `json:"image"`
+	State string `json:"state"`
+}

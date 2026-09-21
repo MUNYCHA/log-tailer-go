@@ -27,6 +27,11 @@ storage:
     - /
     - /var/log
 
+docker:
+  enabled: true                 # reads the Docker socket, read-only
+  channel: your-docker-channel
+  interval: 30s
+
 heartbeat:
   enabled: true                 # omit the whole block to get the same defaults
   channel: agent-heartbeat      # must match what the consumer subscribes to

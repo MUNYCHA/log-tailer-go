@@ -190,3 +190,43 @@ func TestValidate_HeartbeatDisabled_BadIntervalIgnored(t *testing.T) {
 		t.Fatalf("expected no error validating a disabled heartbeat, got: %v", err)
 	}
 }
+
+func TestValidate_DockerDisabled_BadValuesIgnored(t *testing.T) {
+	cfg := validBase()
+	cfg.Docker = config.DockerConfig{Interval: "not-a-duration"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error validating a disabled docker block, got: %v", err)
+	}
+}
+
+func TestValidate_DockerEnabled_MissingChannel(t *testing.T) {
+	cfg := validBase()
+	cfg.Docker = config.DockerConfig{Enabled: true, Interval: "30s"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for missing docker.channel, got nil")
+	}
+}
+
+func TestValidate_DockerEnabled_BadInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Docker = config.DockerConfig{Enabled: true, Channel: "docker-channel", Interval: "not-a-duration"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid docker.interval, got nil")
+	}
+}
+
+func TestValidate_DockerEnabled_ZeroInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Docker = config.DockerConfig{Enabled: true, Channel: "docker-channel", Interval: "0s"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for zero docker.interval, got nil")
+	}
+}
+
+func TestValidate_DockerEnabled_Valid(t *testing.T) {
+	cfg := validBase()
+	cfg.Docker = config.DockerConfig{Enabled: true, Channel: "docker-channel", Interval: "30s"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid docker config to pass, got: %v", err)
+	}
+}
