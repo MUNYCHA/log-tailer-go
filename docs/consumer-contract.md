@@ -449,7 +449,7 @@ and its stats request; the next event shows its new state.
 |---|---|
 | `cgroupVersion` | Docker has not answered `/info` since the agent started |
 | `error` (event) | the container list was read |
-| `containers[].cpuPercent` | the first round a container is seen after startup, the round after it restarts, or Docker reports no CPU count |
+| `containers[].cpuPercent` | the first round after a container starts, restarts, or is created while the agent runs, or Docker reports no CPU count |
 | `containers[].memory` | Docker sent no memory figures for it |
 | `containers[].network` | the container uses host or no networking |
 | `containers[].blockIO` | not running, or its stats failed |
