@@ -155,8 +155,9 @@ type DockerContainer struct {
 	State string `json:"state"`
 
 	// Share of one CPU core, like docker stats: two busy cores read 200.
-	// Averaged since the previous tick, so omitted on the first tick a
-	// container is seen and after it restarts.
+	// Averaged since the previous tick, so omitted the round after a
+	// container starts or restarts. On a 3s or longer interval a pre-read
+	// covers that, except for a start in the last second before the tick.
 	CPUPercent *float64       `json:"cpuPercent,omitempty"`
 	Memory     *DockerMemory  `json:"memory,omitempty"`
 	Network    *DockerNetwork `json:"network,omitempty"`

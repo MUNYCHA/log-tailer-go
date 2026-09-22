@@ -54,6 +54,18 @@ const (
 // timeout or the round budget.
 const errTimedOut = "timed out"
 
+// A container that starts, restarts or is created between two ticks has no
+// sample to difference CPU against, so without help its first event omits
+// cpuPercent. preReadLead before each tick the collector reads every running
+// container's stats once more and keeps the ones the tick needs as a
+// baseline, so the tick has a window of preReadLead to measure over. Below
+// preReadMinInterval the next tick comes soon enough to fill the gap itself,
+// and a pre-read a second before every tick would overlap the ticks.
+const (
+	preReadLead        = time.Second
+	preReadMinInterval = 3 * time.Second
+)
+
 // Publisher ships a batch of serialized events to a pub/sub channel in one
 // pipelined round trip, returning how many were accepted.
 type Publisher interface {
@@ -113,6 +125,17 @@ func (c *Collector) Run(ctx context.Context) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 
+	// The pre-read fires preReadLead before each tick. It is re-armed from
+	// each tick's own time, so a slow round never lets it drift into the tick.
+	// A nil channel never fires, which switches it off for short intervals.
+	var preRead *time.Timer
+	var preReadC <-chan time.Time
+	if usesPreRead(c.interval) {
+		preRead = time.NewTimer(c.interval - preReadLead)
+		defer preRead.Stop()
+		preReadC = preRead.C
+	}
+
 	// Read stats first, so the startup delay doubles as the window CPU % is
 	// measured over and the first event is complete rather than missing
 	// cpuPercent until the next tick. Then publish once after the delay and
@@ -127,9 +150,77 @@ func (c *Collector) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-preReadC:
+			c.preReadCPU(ctx)
+		case tick := <-ticker.C:
 			c.collectAndPublish(ctx)
+			if preRead != nil {
+				preRead.Reset(time.Until(tick.Add(c.interval - preReadLead)))
+			}
 		}
+	}
+}
+
+func usesPreRead(interval time.Duration) bool {
+	return interval >= preReadMinInterval
+}
+
+// preReadCPU reads every running container's stats and keeps a reading only
+// where the coming tick could not difference CPU against the stored sample:
+// a container with none (new, or started since the last tick) or one whose
+// counters went backwards (restarted between ticks without the agent seeing
+// it stop). Every other reading is dropped, so their CPU % stays averaged
+// over the whole interval. Nothing is published and nothing is logged; a
+// failure here is left for the tick to report.
+func (c *Collector) preReadCPU(ctx context.Context) {
+	round, cancel := context.WithTimeout(ctx, preReadLead)
+	defer cancel()
+
+	list, err := c.readContainers(round)
+	if err != nil {
+		return
+	}
+
+	type result struct {
+		id     string
+		sample stats.Sample
+		err    error
+	}
+	var results []result
+	for _, ct := range list {
+		if hasStats(ct.State) {
+			results = append(results, result{id: ct.ID})
+		}
+	}
+
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, maxParallel)
+	for i := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case slots <- struct{}{}:
+			case <-round.Done():
+				results[i].err = round.Err()
+				return
+			}
+			defer func() { <-slots }()
+			results[i].sample, results[i].err = c.readStats(round, results[i].id)
+		}()
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.err != nil || !r.sample.Running {
+			continue
+		}
+		if prev, ok := c.prevStats[r.id]; ok {
+			if _, ok := stats.CPUPercent(prev, r.sample); ok {
+				continue
+			}
+		}
+		c.prevStats[r.id] = r.sample
 	}
 }
 

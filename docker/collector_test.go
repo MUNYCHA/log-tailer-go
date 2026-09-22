@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/docker/stats"
 	"log-tailer-go/model"
 )
 
@@ -417,6 +418,112 @@ func TestRoundBudget(t *testing.T) {
 	for interval, want := range cases {
 		if got := roundBudget(interval); got != want {
 			t.Errorf("roundBudget(%v) = %v, want %v", interval, got, want)
+		}
+	}
+}
+
+func newTestCollector(socket string, pub *fakePublisher) *Collector {
+	return New(socket, "docker-channel", config.IdentityConfig{ServerID: "server-1"}, 10*time.Second, pub)
+}
+
+// A container started since the last tick has no sample to difference; the
+// pre-read gives it one, so its first event has cpuPercent instead of
+// waiting a round. The pre-read itself publishes nothing.
+func TestCollector_PreReadGivesNewContainerCPU(t *testing.T) {
+	_, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
+
+	without := &fakePublisher{}
+	newTestCollector(socket, without).collectAndPublish(context.Background())
+	if cpu := without.events(t)[0].Containers[1].CPUPercent; cpu != nil {
+		t.Fatalf("expected no cpuPercent without a pre-read, got %v", *cpu)
+	}
+
+	pub := &fakePublisher{}
+	c := newTestCollector(socket, pub)
+	c.preReadCPU(context.Background())
+	if n := len(pub.events(t)); n != 0 {
+		t.Fatalf("expected the pre-read to publish nothing, got %d events", n)
+	}
+	c.collectAndPublish(context.Background())
+
+	valkey := pub.events(t)[0].Containers[1]
+	if valkey.CPUPercent == nil || *valkey.CPUPercent != 100 {
+		t.Fatalf("expected cpuPercent 100 on the first event after a pre-read, got %+v", valkey)
+	}
+}
+
+// A container restarted between ticks keeps its old sample, whose counters
+// are ahead of the new run's; the pre-read replaces it so the tick has a
+// usable window
+func TestCollector_PreReadReplacesSampleFromBeforeARestart(t *testing.T) {
+	_, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
+	pub := &fakePublisher{}
+	c := newTestCollector(socket, pub)
+	c.prevStats[valkeyID] = stats.Sample{Running: true, CPUTotal: 1 << 40, SystemTotal: 1, HasSystem: true, CPUs: 4}
+
+	c.preReadCPU(context.Background())
+	c.collectAndPublish(context.Background())
+
+	valkey := pub.events(t)[0].Containers[1]
+	if valkey.CPUPercent == nil || *valkey.CPUPercent != 100 {
+		t.Fatalf("expected cpuPercent 100 after a restart the pre-read caught, got %+v", valkey)
+	}
+}
+
+// A container whose stored sample still works keeps it: the pre-read's
+// reading is dropped, so CPU % stays averaged over the whole interval
+func TestCollector_PreReadKeepsAWorkingSample(t *testing.T) {
+	f, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
+	c := newTestCollector(socket, &fakePublisher{})
+	c.collectAndPublish(context.Background())
+	before := c.prevStats[valkeyID]
+
+	c.preReadCPU(context.Background())
+
+	if f.calls != 2 {
+		t.Fatalf("expected the pre-read to read stats, got %d stats calls", f.calls)
+	}
+	if got := c.prevStats[valkeyID]; got != before {
+		t.Fatalf("expected the stored sample kept, got %+v, want %+v", got, before)
+	}
+	if _, ok := c.prevStats[postgresID]; ok {
+		t.Fatal("expected no sample for a stopped container")
+	}
+}
+
+// Run fires the pre-read a second before each tick: at a 3s interval the
+// stats are read at start (prime), 1s (first event), 2s (pre-read) and 3s
+// (tick)
+func TestCollector_RunPreReadsBeforeEachTick(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits a full 3s interval")
+	}
+	f, socket := startFakeDocker(t, `{"CgroupVersion":"2"}`)
+	pub := &fakePublisher{}
+	c := New(socket, "docker-channel", config.IdentityConfig{ServerID: "server-1"}, preReadMinInterval, pub)
+	ctx, cancel := context.WithTimeout(context.Background(), preReadMinInterval+500*time.Millisecond)
+	defer cancel()
+	c.Run(ctx)
+
+	if n := len(pub.events(t)); n != 2 {
+		t.Fatalf("expected 2 events (startup and one tick), got %d", n)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.calls != 4 {
+		t.Fatalf("expected 4 stats reads (prime, first event, pre-read, tick), got %d", f.calls)
+	}
+}
+
+func TestUsesPreRead(t *testing.T) {
+	for interval, want := range map[time.Duration]bool{
+		200 * time.Millisecond: false,
+		2 * time.Second:        false,
+		3 * time.Second:        true,
+		10 * time.Second:       true,
+	} {
+		if got := usesPreRead(interval); got != want {
+			t.Errorf("usesPreRead(%v) = %v, want %v", interval, got, want)
 		}
 	}
 }
