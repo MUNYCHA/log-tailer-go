@@ -24,8 +24,8 @@ guaranteed to be there.
    is present. There is no half-filled group.
 6. **Lists are always present**, as `[]` when empty. Never `null`, never
    absent.
-7. **The interval-driven events — `resources`, `storage`, `docker` and
-   `heartbeat` — publish once a second after startup**, then on their own intervals. A
+7. **The interval-driven events — `resources`, `storage`, `docker`,
+   `postgres` and `heartbeat` — publish once a second after startup**, then on their own intervals. A
    consumer sees one event per channel right after an agent restart, out of
    step with the interval it was expecting and carrying no marker saying so.
    It is a complete event, but any rate in it is measured over that one second
@@ -39,7 +39,7 @@ Rules 2 and 8 are the two that cause real incidents. The rest are convenience.
 
 ## Identity
 
-Every `logs`, `resources`, `storage` and `docker` event opens with the same two fields,
+Every `logs`, `resources`, `storage`, `docker` and `postgres` event opens with the same two fields,
 in the same order, always present:
 
 ```json
@@ -461,6 +461,124 @@ and its stats request; the next event shows its new state.
 `exitCode` `0` is a clean exit and is published; only a never-started
 container omits it. `finishedAt` is RFC 3339 UTC like `timestamp`.
 
+## postgres
+
+One event per interval describing the Postgres on the server. It carries
+numbers and names only, never SQL text or row data.
+
+### Normal
+
+```json
+{
+  "serverId": "your-server-id",
+  "timestamp": "2026-09-30T03:47:12Z",
+  "up": true,
+  "startedAt": "2026-09-30T03:45:35Z",
+  "uptimeSeconds": 97,
+  "role": "primary",
+  "connections": { "max": 100, "used": 2, "byState": { "active": 1, "idle in transaction": 1 } },
+  "longRunning": [
+    { "pid": 29268, "database": "app", "user": "app", "state": "idle in transaction", "transactionSeconds": 68.7 }
+  ],
+  "blocked": [
+    { "pid": 29269, "database": "app", "user": "app", "querySeconds": 68.7, "blockedBy": [29268] }
+  ],
+  "replicas": [],
+  "databases": [
+    {
+      "name": "app",
+      "sizeBytes": 14479843,
+      "xidAge": 21,
+      "cacheHitPercent": 99.2,
+      "activity": { "seconds": 60.01, "commits": 1204, "rollbacks": 2, "deadlocks": 0, "tempFiles": 0, "tempBytes": 0 },
+      "largestTables": [ { "schema": "public", "table": "orders", "totalBytes": 7176192 } ],
+      "deadTuples": [ { "schema": "public", "table": "orders", "liveTuples": 100000, "deadTuples": 30000 } ]
+    }
+  ]
+}
+```
+
+`up` is always present. The four lists `longRunning`, `blocked`, `replicas`
+and `databases` are always present, and so are `name`, `xidAge`,
+`largestTables` and `deadTuples` on every database. `longRunning`, `blocked`,
+`largestTables` and `deadTuples` hold at most 10 entries each.
+
+- **`activity` counts events since the previous event**, over
+  `activity.seconds`, not totals. Divide by `seconds` for a rate.
+- **`startedAt` changing is a Postgres restart.** `uptimeSeconds` drops at the
+  same time.
+- **`replayDelaySeconds` grows while the primary is idle**, since it is the time
+  since the last replayed transaction. Read it together with `unreplayedBytes`:
+  a large delay with `0` unreplayed bytes is an idle primary, not a lagging
+  replica.
+
+### Postgres unreachable or refusing the agent
+
+```json
+{
+  "serverId": "your-server-id",
+  "timestamp": "2026-09-30T03:47:36Z",
+  "up": true,
+  "error": "FATAL: role \"root\" is not permitted to log in (SQLSTATE 28000)",
+  "longRunning": [],
+  "blocked": [],
+  "replicas": [],
+  "databases": []
+}
+```
+
+**Check `error` before reading the empty lists.** `up` says which failure it
+is:
+
+| `up` | Meaning |
+|---|---|
+| `false` | Postgres did not answer: stopped, crashed, socket missing, starting up or shutting down |
+| `true` with `error` | Postgres is running but refused the agent: a missing role or `pg_hba.conf` line. A setup problem, not an outage |
+
+### One part failing
+
+A part that could not be read is left out and named in `errors`, with the
+reason. Everything else in the event is still there:
+
+```json
+"errors": { "blocked": "timed out" }
+```
+
+The keys at the top level are `server` (`startedAt`, `uptimeSeconds`, `role`),
+`connections`, `longRunning`, `blocked`, `replication` (`replicas`,
+`replayDelaySeconds`, `unreplayedBytes`), `databases` and `sizes`
+(`sizeBytes`). A failed list stays `[]`, so as with docker, **check `errors`
+before reading an empty list as "none"**.
+
+Each database has its own `errors`, keyed `connect`, `largestTables` or
+`deadTuples`. `connect` means its tables could not be read at all: access
+revoked, connections disabled on it, or out of time. Its size, XID age and
+activity come from the server-wide session and are still there.
+
+`"timed out"` means the round ran out of time: it is cut off at the interval,
+capped at 30 seconds. Any other value is Postgres's or the driver's own
+message.
+
+### What can be absent
+
+| Key | Absent when |
+|---|---|
+| `error` | the agent connected |
+| `startedAt`, `uptimeSeconds`, `role` | not connected, or `errors.server` — always together |
+| `connections` | not connected, or `errors.connections` |
+| `replayDelaySeconds`, `unreplayedBytes` | a primary, or a replica that has not replayed or received anything yet |
+| `errors` | nothing failed |
+| `longRunning[].querySeconds` | the session is not running a query (idle in transaction) |
+| `longRunning[].transactionSeconds` | the session has no transaction open |
+| `database`, `user`, `application` in sessions | Postgres has none for it (a background process, or an app that sets no name) |
+| `replicas[].replayLagSeconds`, `replayLagBytes` | the replica has not reported a replay position yet; `replayLagSeconds` also while nothing is being written |
+| `replicas[].application`, `clientAddr` | the replica set no name, or connects over a socket |
+| `databases[].sizeBytes` | `errors.sizes` |
+| `databases[].activity` | the first event a database appears in, a round where `errors.server` is set, and the event after Postgres restarts or the database's stats are reset |
+| `databases[].cacheHitPercent` | `activity` is absent, or no block was read since the previous event |
+| `databases[].errors` | nothing failed for that database |
+| `deadTuples[].lastAutovacuum` | autovacuum has never run on that table |
+
 ## Mapping this in any language
 
 The single rule is **absent is a valid value, not a parse error**, and it must
@@ -491,7 +609,8 @@ usedPercent declared as a float          → absent becomes 0.0 → a busy CPU
 So: **every optional scalar needs a type that can hold "no value"** — nullable,
 boxed, `Option`, or a sentinel you check explicitly. Use a plain primitive only
 for the fields listed as always present: `serverId`, `timestamp`,
-`partial`, `path`, a container's `id`, `name`, `image` and `state`, and the
+`partial`, `path`, a container's `id`, `name`, `image` and `state`, postgres
+`up`, a database's `name` and `xidAge`, and the
 numbers *inside* a group, which are guaranteed whenever the group itself is
 there.
 

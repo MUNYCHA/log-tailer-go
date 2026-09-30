@@ -230,3 +230,43 @@ func TestValidate_DockerEnabled_Valid(t *testing.T) {
 		t.Fatalf("expected valid docker config to pass, got: %v", err)
 	}
 }
+
+func TestValidate_PostgresDisabled_BadValuesIgnored(t *testing.T) {
+	cfg := validBase()
+	cfg.Database.Postgres = config.PostgresConfig{Interval: "not-a-duration"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error validating a disabled postgres block, got: %v", err)
+	}
+}
+
+func TestValidate_PostgresEnabled_MissingChannel(t *testing.T) {
+	cfg := validBase()
+	cfg.Database.Postgres = config.PostgresConfig{Enabled: true, Interval: "1m"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for missing database.postgres.channel, got nil")
+	}
+}
+
+func TestValidate_PostgresEnabled_BadInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Database.Postgres = config.PostgresConfig{Enabled: true, Channel: "postgres-channel", Interval: "not-a-duration"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid database.postgres.interval, got nil")
+	}
+}
+
+func TestValidate_PostgresEnabled_ZeroInterval(t *testing.T) {
+	cfg := validBase()
+	cfg.Database.Postgres = config.PostgresConfig{Enabled: true, Channel: "postgres-channel", Interval: "0s"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for zero database.postgres.interval, got nil")
+	}
+}
+
+func TestValidate_PostgresEnabled_Valid(t *testing.T) {
+	cfg := validBase()
+	cfg.Database.Postgres = config.PostgresConfig{Enabled: true, Channel: "postgres-channel", Interval: "1m"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid postgres config to pass, got: %v", err)
+	}
+}

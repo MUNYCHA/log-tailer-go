@@ -41,6 +41,7 @@ type AppConfig struct {
 	Storage   StorageConfig   `json:"storage"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Docker    DockerConfig    `json:"docker"`
+	Database  DatabaseConfig  `json:"database"`
 }
 
 type RedisConfig struct {
@@ -93,6 +94,23 @@ type DockerConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Channel  string `json:"channel"`
 	Interval string `json:"interval"` // e.g. "30s" — parsed with time.ParseDuration
+}
+
+// DatabaseConfig holds one block per database engine. Each engine is its own
+// collector with its own channel and interval, so one engine failing never
+// holds up another.
+type DatabaseConfig struct {
+	Postgres PostgresConfig `json:"postgres"`
+}
+
+// PostgresConfig gates the postgres event: health stats of the local
+// Postgres, read over its Unix socket with peer authentication. There is no
+// user, password, socket or database list to configure: the agent logs in as
+// the OS user it runs as and reports every database it finds.
+type PostgresConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Channel  string `json:"channel"`
+	Interval string `json:"interval"` // e.g. "1m" — parsed with time.ParseDuration
 }
 
 // HeartbeatConfig gates the liveness beat. Enabled is a pointer so an omitted
@@ -179,6 +197,14 @@ func (c *AppConfig) Validate() error {
 		}
 		if d, err := time.ParseDuration(c.Docker.Interval); err != nil || d <= 0 {
 			return fmt.Errorf("'docker.interval' must be a positive duration (e.g. \"30s\")")
+		}
+	}
+	if c.Database.Postgres.Enabled {
+		if c.Database.Postgres.Channel == "" {
+			return fmt.Errorf("'database.postgres.channel' is required")
+		}
+		if d, err := time.ParseDuration(c.Database.Postgres.Interval); err != nil || d <= 0 {
+			return fmt.Errorf("'database.postgres.interval' must be a positive duration (e.g. \"1m\")")
 		}
 	}
 	if c.Heartbeat.IsEnabled() {
