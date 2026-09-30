@@ -197,3 +197,146 @@ type DockerBlockIO struct {
 	ReadBytes  uint64 `json:"readBytes"`
 	WriteBytes uint64 `json:"writeBytes"`
 }
+
+// PostgresEvent is one snapshot of the local Postgres: whether it is up, its
+// sessions and replication, and per-database stats. It carries numbers and
+// names only — never SQL text or row data, which can hold secrets.
+type PostgresEvent struct {
+	ServerID  string `json:"serverId"`
+	Timestamp string `json:"timestamp"`
+
+	// False when the agent could not reach Postgres at all: no socket, the
+	// connection refused or timed out, or the server starting up or shutting
+	// down. A login Postgres answers but rejects reads true with Error set:
+	// the server is running, it just refused the agent.
+	Up bool `json:"up"`
+
+	// Set when the agent could not connect; every other field is then absent
+	// and every list empty
+	Error string `json:"error,omitempty"`
+
+	StartedAt     string `json:"startedAt,omitempty"` // RFC 3339, UTC
+	UptimeSeconds *int64 `json:"uptimeSeconds,omitempty"`
+	Role          string `json:"role,omitempty"` // primary or replica
+
+	Connections *PostgresConnections `json:"connections,omitempty"`
+
+	// Always present; capped at the 10 longest, longest first
+	LongRunning []PostgresSession `json:"longRunning"`
+	Blocked     []PostgresBlocked `json:"blocked"`
+
+	// Always present: servers streaming from this one, empty when none
+	Replicas []PostgresReplica `json:"replicas"`
+
+	// Replica only. Delay is the time since the last replayed transaction,
+	// so it also grows while the primary is idle. Unreplayed is WAL received
+	// but not replayed yet.
+	ReplayDelaySeconds *float64 `json:"replayDelaySeconds,omitempty"`
+	UnreplayedBytes    *int64   `json:"unreplayedBytes,omitempty"`
+
+	// Always present: every non-template database, sorted by name
+	Databases []PostgresDatabase `json:"databases"`
+
+	// What could not be read this round, keyed by the part it belongs to
+	// (server, connections, longRunning, blocked, replication, databases,
+	// sizes). Everything else in the event is still published.
+	Errors map[string]string `json:"errors,omitempty"`
+}
+
+// PostgresConnections counts client sessions, not counting the agent's own,
+// against the max_connections setting.
+type PostgresConnections struct {
+	Max     int            `json:"max"`
+	Used    int            `json:"used"`
+	ByState map[string]int `json:"byState"`
+}
+
+// PostgresSession is a client session running one query, or holding one
+// transaction open, for over a minute. QuerySeconds is set while a query is
+// active; TransactionSeconds while a transaction is open, which catches
+// sessions left idle in transaction.
+type PostgresSession struct {
+	PID                int      `json:"pid"`
+	Database           string   `json:"database,omitempty"`
+	User               string   `json:"user,omitempty"`
+	Application        string   `json:"application,omitempty"`
+	State              string   `json:"state"`
+	QuerySeconds       *float64 `json:"querySeconds,omitempty"`
+	TransactionSeconds *float64 `json:"transactionSeconds,omitempty"`
+}
+
+// PostgresBlocked is a session waiting on a lock, and the pids holding it up.
+// QuerySeconds is how long its current query has run, which includes the wait.
+type PostgresBlocked struct {
+	PID          int      `json:"pid"`
+	Database     string   `json:"database,omitempty"`
+	User         string   `json:"user,omitempty"`
+	Application  string   `json:"application,omitempty"`
+	QuerySeconds *float64 `json:"querySeconds,omitempty"`
+	BlockedBy    []int    `json:"blockedBy"`
+}
+
+// PostgresReplica is one server streaming WAL from this one. The lags are
+// absent until the replica has replayed something, and ReplayLagSeconds also
+// while nothing is being written.
+type PostgresReplica struct {
+	Application      string   `json:"application,omitempty"`
+	ClientAddr       string   `json:"clientAddr,omitempty"`
+	State            string   `json:"state"`
+	ReplayLagSeconds *float64 `json:"replayLagSeconds,omitempty"`
+	ReplayLagBytes   *int64   `json:"replayLagBytes,omitempty"`
+}
+
+// PostgresDatabase is one database. Its tables are read over a connection to
+// that database; when the connection fails, Errors["connect"] says why and
+// both table lists are empty.
+type PostgresDatabase struct {
+	Name      string `json:"name"`
+	SizeBytes *int64 `json:"sizeBytes,omitempty"`
+
+	// Transactions since the database was last frozen. Postgres stops
+	// accepting writes near 2 billion to prevent wraparound.
+	XIDAge int64 `json:"xidAge"`
+
+	// Share of block reads served from memory since the previous event.
+	// Absent when nothing was read, or when Activity is absent.
+	CacheHitPercent *float64 `json:"cacheHitPercent,omitempty"`
+
+	Activity *PostgresActivity `json:"activity,omitempty"`
+
+	// Always present; top 10 each
+	LargestTables []PostgresTableSize  `json:"largestTables"`
+	DeadTuples    []PostgresDeadTuples `json:"deadTuples"`
+
+	// Keyed by connect, largestTables or deadTuples
+	Errors map[string]string `json:"errors,omitempty"`
+}
+
+// PostgresActivity is what happened in a database since the previous event,
+// over Seconds. Absent on the first event of a database and after Postgres
+// restarts or its stats are reset, when there is nothing to difference.
+type PostgresActivity struct {
+	Seconds   float64 `json:"seconds"`
+	Commits   int64   `json:"commits"`
+	Rollbacks int64   `json:"rollbacks"`
+	Deadlocks int64   `json:"deadlocks"`
+	TempFiles int64   `json:"tempFiles"`
+	TempBytes int64   `json:"tempBytes"`
+}
+
+// PostgresTableSize is a table with its indexes and TOAST, in bytes.
+type PostgresTableSize struct {
+	Schema     string `json:"schema"`
+	Table      string `json:"table"`
+	TotalBytes int64  `json:"totalBytes"`
+}
+
+// PostgresDeadTuples is a table's dead rows waiting for vacuum.
+// LastAutovacuum is absent when autovacuum has never run on it.
+type PostgresDeadTuples struct {
+	Schema         string `json:"schema"`
+	Table          string `json:"table"`
+	LiveTuples     int64  `json:"liveTuples"`
+	DeadTuples     int64  `json:"deadTuples"`
+	LastAutovacuum string `json:"lastAutovacuum,omitempty"` // RFC 3339, UTC
+}
