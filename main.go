@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"log-tailer-go/config"
+	"log-tailer-go/db"
+	"log-tailer-go/db/postgres"
 	"log-tailer-go/docker"
 	"log-tailer-go/docker/client"
 	"log-tailer-go/heartbeat"
@@ -38,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !cfg.LogTailer.Enabled && !cfg.Resources.Enabled && !cfg.Storage.Enabled && !cfg.Docker.Enabled && !cfg.Heartbeat.IsEnabled() {
+	if !cfg.LogTailer.Enabled && !cfg.Resources.Enabled && !cfg.Storage.Enabled && !cfg.Docker.Enabled && !cfg.Database.Postgres.Enabled && !cfg.Heartbeat.IsEnabled() {
 		slog.Error("No component is enabled in config, nothing to do")
 		os.Exit(1)
 	}
@@ -66,6 +68,15 @@ func main() {
 		dockerInterval, err = time.ParseDuration(cfg.Docker.Interval)
 		if err != nil {
 			slog.Error("Failed to parse docker.interval", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	var postgresInterval time.Duration
+	if cfg.Database.Postgres.Enabled {
+		postgresInterval, err = time.ParseDuration(cfg.Database.Postgres.Interval)
+		if err != nil {
+			slog.Error("Failed to parse database.postgres.interval", "error", err)
 			os.Exit(1)
 		}
 	}
@@ -120,6 +131,15 @@ func main() {
 	if cfg.Docker.Enabled {
 		runSupervised(ctx, &wg, "docker", func(ctx context.Context) {
 			docker.New(client.SocketPath, cfg.Docker.Channel, cfg.Identity, dockerInterval, publisher).Run(ctx)
+		})
+	}
+
+	// Supervised separately on purpose: a slow or down Postgres only delays
+	// the postgres event, never the other collectors or the beat
+	if cfg.Database.Postgres.Enabled {
+		runSupervised(ctx, &wg, "postgres", func(ctx context.Context) {
+			engine := postgres.New(cfg.Identity.ServerID, postgres.SocketDir)
+			db.New("postgres", cfg.Database.Postgres.Channel, postgresInterval, engine, publisher).Run(ctx)
 		})
 	}
 
