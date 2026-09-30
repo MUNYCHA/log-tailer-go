@@ -32,6 +32,12 @@ docker:
   channel: your-docker-channel
   interval: 30s
 
+database:
+  postgres:
+    enabled: true               # local socket + peer auth, no password; see README
+    channel: your-postgres-channel
+    interval: 1m
+
 heartbeat:
   enabled: true                 # omit the whole block to get the same defaults
   channel: agent-heartbeat      # must match what the consumer subscribes to

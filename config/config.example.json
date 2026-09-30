@@ -36,6 +36,14 @@
     "interval": "30s"
   },
 
+  "database": {
+    "postgres": {
+      "enabled": true,
+      "channel": "your-postgres-channel",
+      "interval": "1m"
+    }
+  },
+
   "heartbeat": {
     "enabled": true,
     "channel": "agent-heartbeat",
