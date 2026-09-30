@@ -9,7 +9,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Publishes each line as a JSON event to a Redis Pub/Sub channel
 - Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
 - Bursts are published as pipelined batches (one round trip per 64 KB read chunk), sustaining 50k+ lines/s per file while staying synchronous — no internal queues
-- Every component — each per-file tailer, the resources, storage and docker collectors, and the heartbeat — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
+- Every component — each per-file tailer, the resources, storage, docker and postgres collectors, and the heartbeat — recovers from panics and restarts automatically (1 s delay so a crash loop can't spin hot)
 - Each tailer logs a liveness line to the journal every 5 minutes with its lines-shipped count — silent zero-shipping is visible without a subscriber (this is a journal log, unrelated to the `agent-heartbeat` channel below)
 - Waits for Redis at startup — retries every 5 s instead of exiting, so it also self-heals when run without systemd
 - Auto-reconnects if Redis goes down mid-run; publish failures are logged with throttling and memory stays flat (nothing is buffered)
@@ -19,8 +19,9 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Optional resources collector publishes server uptime, load average, CPU utilisation, memory/swap and network throughput as one JSON event on its own timer
 - Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
 - Optional docker collector publishes every container on the server as one JSON event: the `docker stats` figures (CPU, memory, network, block I/O, PIDs) for running containers and the last exit code and time for stopped ones. It is strictly read-only: every request to the Docker socket passes an allow-list that only lets four `GET`s through, so the agent can never stop, remove or exec into a container
+- Optional postgres collector publishes the health of the local Postgres as one JSON event: whether it is up, connections, long-running and blocked sessions, replication, and per-database size, XID age, activity, cache hit ratio, largest tables and dead tuples. It logs in over the Unix socket with peer authentication, so there is no password to store, and its sessions are read-only with short statement and lock timeouts, so it can fail but never slow the database down
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collectors, so a wedged storage read can't make a healthy server look down
-- The resources, storage, docker and heartbeat events all publish one second after start and then on their own intervals, so a restarted agent reports at once instead of after a whole interval of silence
+- The resources, storage, docker, postgres and heartbeat events all publish one second after start and then on their own intervals, so a restarted agent reports at once instead of after a whole interval of silence
 - Graceful shutdown on `SIGTERM` / `SIGINT` — publishes are synchronous, so exit is immediate with nothing left in flight
 
 ## Requirements
@@ -34,6 +35,8 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - **Go 1.25+** to build (`go.mod`); the resulting binary has no runtime dependencies
 - **Redis** reachable from the server (Pub/Sub only, no persistence needed)
 - **Docker** only for the optional docker collector: the agent must be able to open `/var/run/docker.sock`, so it runs as root or as a member of the `docker` group. Any Docker from 1.13 (2017) on is expected to work, through the API's backward compatibility; **tested on Docker 29.6**. Older daemons that lack a field (such as the PID count) have it omitted
+
+- **Postgres 10 or newer** only for the optional postgres collector, installed on the host (not in a container) with its socket in `/var/run/postgresql` on port 5432 — the default for the Debian, Ubuntu and RHEL packages. It needs a one-time role and `pg_hba.conf` line on each server; see [Postgres setup](#postgres-setup). **Tested on Postgres 16**
 
 ## Project Structure
 
@@ -77,6 +80,12 @@ log-tailer-go/
 │   ├── stats/           — GET /containers/{id}/stats → cpu, memory, network, block I/O, pids
 │   ├── state/           — GET /containers/{id}/json → last exit code and finish time
 │   └── cgroup/          — GET /info → the cgroup version behind Docker's counters
+├── db/
+│   ├── collector.go     — every interval: asks its engine for one event and publishes it;
+│   │                      each engine runs as its own collector
+│   ├── collector_test.go
+│   └── postgres/        — engine.go orchestrates; read.go holds the connection and every query;
+│                          parse.go and calculate.go turn rows into published values
 ├── heartbeat/
 │   ├── heartbeat.go     — fixed-interval liveness beat
 │   └── heartbeat_test.go
@@ -369,6 +378,98 @@ The client in `docker/client/` refuses anything else before it reaches the socke
 
 Each request is limited to 5 seconds and each reply to 8 MB, and at most 8 stats and 8 detail requests run at once, so a server with hundreds of containers never opens hundreds of connections to the daemon. A round on a typical server takes a few tens of milliseconds; on a daemon older than 20.10, which ignores `one-shot`, each stats request takes about a second, so a round takes about a second longer.
 
+### Postgres
+
+When `database.postgres.enabled` is `true`, the health of the local Postgres is published to `database.postgres.channel` a second after startup and then every `database.postgres.interval`:
+
+```json
+{
+  "serverId": "your-server-id",
+  "timestamp": "2026-09-30T03:47:12Z",
+  "up": true,
+  "startedAt": "2026-09-30T03:45:35Z",
+  "uptimeSeconds": 97,
+  "role": "primary",
+  "connections": { "max": 100, "used": 2, "byState": { "active": 1, "idle in transaction": 1 } },
+  "longRunning": [
+    { "pid": 29268, "database": "app", "user": "app", "state": "idle in transaction", "transactionSeconds": 68.7 }
+  ],
+  "blocked": [
+    { "pid": 29269, "database": "app", "user": "app", "application": "worker", "querySeconds": 68.7, "blockedBy": [29268] }
+  ],
+  "replicas": [],
+  "databases": [
+    {
+      "name": "app",
+      "sizeBytes": 14479843,
+      "xidAge": 21,
+      "cacheHitPercent": 99.2,
+      "activity": { "seconds": 60.01, "commits": 1204, "rollbacks": 2, "deadlocks": 0, "tempFiles": 0, "tempBytes": 0 },
+      "largestTables": [ { "schema": "public", "table": "orders", "totalBytes": 7176192 } ],
+      "deadTuples": [ { "schema": "public", "table": "orders", "liveTuples": 100000, "deadTuples": 30000, "lastAutovacuum": "2026-09-30T03:40:02Z" } ]
+    }
+  ]
+}
+```
+
+| Field | Source | Notes |
+|---|---|---|
+| `up`, `startedAt`, `uptimeSeconds` | `pg_postmaster_start_time()` | `startedAt` changing between events is a restart |
+| `role` | `pg_is_in_recovery()` | `primary` or `replica` |
+| `connections` | `pg_stat_activity`, `max_connections` | Client sessions by state, not counting the agent's own |
+| `longRunning` | `pg_stat_activity` | Sessions with a query or transaction open over a minute, 10 longest. Catches `idle in transaction` |
+| `blocked` | `pg_stat_activity`, `pg_blocking_pids()` | Sessions waiting on a lock and the pids holding it, 10 longest |
+| `replicas` | `pg_stat_replication` | Servers streaming from this one, with replay lag in seconds and bytes |
+| `replayDelaySeconds`, `unreplayedBytes` | replica only | Time since the last replayed transaction (it also grows while the primary is idle), and WAL received but not replayed |
+| `databases[].sizeBytes` | `pg_database_size()` | |
+| `databases[].xidAge` | `age(datfrozenxid)` | Postgres stops accepting writes near 2 billion to prevent wraparound |
+| `databases[].activity` | `pg_stat_database` | Commits, rollbacks, deadlocks and temp files since the previous event, over `seconds` |
+| `databases[].cacheHitPercent` | `pg_stat_database` | Share of block reads served from shared buffers since the previous event |
+| `databases[].largestTables` | `pg_total_relation_size()` | 10 largest, including indexes and TOAST |
+| `databases[].deadTuples` | `pg_stat_user_tables` | 10 tables with the most dead rows, and when autovacuum last ran on them |
+
+**No SQL text, no row data.** `pg_stat_activity` holds the raw SQL of every session, values included — emails, tokens, sometimes a password in `ALTER ROLE`. The agent never selects it: sessions are published as pid, database, user, application, state and durations only. Top queries from `pg_stat_statements` are left out for the same reason.
+
+**It can fail, but never slow the database down.** Every session the agent opens:
+
+- is **read-only** (`default_transaction_read_only = on`), on a role with only `pg_monitor`, running `SELECT`s on statistics views and catalogs — never a user table
+- cancels any query after **5 seconds** (`statement_timeout`) and never waits more than **1 second** for a lock (`lock_timeout`)
+- is named `log-tailer-go` (`application_name`), so a DBA can see it
+- is closed before the next one opens: server-wide stats are read over one session to the `postgres` database, then each database's tables over a session to that database, one at a time
+
+A round is cut off at the interval, capped at 30 seconds. Whatever did not finish is published as `"timed out"` and the event goes out on time.
+
+**Activity is a difference between two readings**, like `cpu.usedPercent`. A reading at startup makes it present from the first event. It is left out for one event after Postgres restarts or a database's stats are reset.
+
+#### Postgres setup
+
+The agent logs in over the local socket with **peer authentication**: the kernel tells Postgres which OS user is connecting, and Postgres lets it in as the role of the same name. There is no password anywhere. Once per server, a DBA creates that role and allows it. Name the role after the OS user the agent runs as — `User=` in the systemd unit, or `root` when the unit sets none:
+
+```sql
+CREATE ROLE "root" LOGIN CONNECTION LIMIT 1;
+GRANT pg_monitor TO "root";
+```
+
+and adds this line to `pg_hba.conf`, **above** any other `local` line (the first matching line wins), then reloads (`SELECT pg_reload_conf();`):
+
+```
+local  all  root  peer
+```
+
+`pg_monitor` is Postgres's built-in monitoring role: it can read every statistics view and cannot change any data. `CONNECTION LIMIT 1` makes it impossible for the agent to hold more than one session, even through a bug. On Postgres 14 and older every role can create tables in the `public` schema by default; `REVOKE CREATE ON SCHEMA public FROM PUBLIC;` closes that for all roles, and is the DBA's call.
+
+**When Postgres misbehaves.** The collector is supervised separately, so nothing here can delay the other events:
+
+| Case | Published |
+|---|---|
+| Postgres down, socket missing, starting up or shutting down | `up: false` with `error`, every list empty; logged once when it starts and once when it clears |
+| Postgres rejects the login (no role, `pg_hba.conf` line missing) | `up: true` with `error`: the server is running, it refused the agent |
+| One part fails or times out | that part left out and named in `errors`; everything else still published |
+| One database refuses a session (`CONNECT` revoked, connections disabled) | that database's `errors.connect`, empty table lists; the rest unaffected |
+| A table is locked exclusively (`ALTER TABLE`, `VACUUM FULL`) | that database's `errors.largestTables` after 1 second |
+
+Not covered: Postgres running inside a container (its socket is not on the host), and a second Postgres on another port.
+
 ### Heartbeat
 
 When `heartbeat.enabled` is `true` (the default), a beat is published to `heartbeat.channel` — `agent-heartbeat` unless overridden — a second after startup and then every `heartbeat.interval`:
@@ -395,9 +496,9 @@ A value the agent cannot read is **left out of the JSON entirely** — never sen
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
-The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled, and `docker.channel` and a positive `docker.interval` when docker is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, no `docker`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled, `docker.channel` and a positive `docker.interval` when docker is enabled, and `database.postgres.channel` and a positive `database.postgres.interval` when postgres is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, no `docker`, no `database.postgres`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
 
-Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All four wait the same second, so the first heartbeat, resources, storage and docker events go out together. `resources` and `docker` spend that second taking the baseline reading their rates are differenced against, so their first events are complete rather than missing `cpu.usedPercent`, `network` and `cpuPercent`. An interval shorter than a second is not delayed by it.
+Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All of them wait the same second, so the first heartbeat, resources, storage, docker and postgres events go out together. `resources`, `docker` and `postgres` spend that second taking the baseline reading their rates are differenced against, so their first events are complete rather than missing `cpu.usedPercent`, `network`, `cpuPercent` and `activity`. An interval shorter than a second is not delayed by it.
 
 The whole `heartbeat` block is optional: omit it and the heartbeat runs on `agent-heartbeat` at its 10s default, so a config written before the heartbeat existed picks it up without being edited. Set `heartbeat.enabled: false` to opt out; a disabled heartbeat isn't validated, so a stale interval can't block startup.
 
@@ -427,6 +528,9 @@ cp config/config.example.yaml config/config.yaml
 | `docker.enabled` | Enable or disable the docker collector. There is no container list to configure: the event reports every container Docker has |
 | `docker.channel` | Redis Pub/Sub channel for docker events |
 | `docker.interval` | Collection interval, as a Go duration string (e.g. `"30s"`) |
+| `database.postgres.enabled` | Enable or disable the postgres collector. There is no user, password, socket or database list to configure: it logs in as the OS user over `/var/run/postgresql` and reports every database |
+| `database.postgres.channel` | Redis Pub/Sub channel for postgres events |
+| `database.postgres.interval` | Collection interval, as a Go duration string (e.g. `"1m"`) |
 | `heartbeat.enabled` | Enable or disable the heartbeat (default `true` when the key or the whole block is omitted) |
 | `heartbeat.channel` | Channel beats are published to (default `"agent-heartbeat"`; an empty value falls back to it). Must match what the consumer subscribes to |
 | `heartbeat.interval` | Beat interval, as a Go duration string (default `"10s"`; must stay well under the consumer's TTL) |
