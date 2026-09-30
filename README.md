@@ -36,7 +36,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - **Redis** reachable from the server (Pub/Sub only, no persistence needed)
 - **Docker** only for the optional docker collector: the agent must be able to open `/var/run/docker.sock`, so it runs as root or as a member of the `docker` group. Any Docker from 1.13 (2017) on is expected to work, through the API's backward compatibility; **tested on Docker 29.6**. Older daemons that lack a field (such as the PID count) have it omitted
 
-- **Postgres 10 or newer** only for the optional postgres collector, installed on the host (not in a container) with its socket in `/var/run/postgresql` on port 5432 — the default for the Debian, Ubuntu and RHEL packages. It needs a one-time role and `pg_hba.conf` line on each server; see [Postgres setup](#postgres-setup). **Tested on Postgres 16**
+- **Postgres 10 or newer** only for the optional postgres collector, installed on the host (not in a container) with its socket in `/var/run/postgresql` on port 5432 — the default for the Debian, Ubuntu and RHEL packages. It needs a one-time role and `pg_hba.conf` line on each server; see [Postgres setup](#postgres-setup). **Tested on Postgres 10, 16 and 18**
 
 ## Project Structure
 
