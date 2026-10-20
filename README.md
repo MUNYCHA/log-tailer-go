@@ -142,7 +142,21 @@ logTailer:
       channel: app-logs
 ```
 
-`*` matches any characters, `?` exactly one, `[0-9]` one from a set (Go's `filepath.Match` syntax). A path containing any of `* ? [` is a wildcard; anything else is an exact path, unchanged.
+Copy the real file name and replace only the part that changes. Everything else must match the real name exactly, including `-`, `_` and `.`.
+
+| Symbol | Matches | Example | Matches | Doesn't match |
+|---|---|---|---|---|
+| `?` | exactly 1 character — letter, digit or sign | `app?log` | `app-log`, `app_log`, `app1log` | `applog`, `app--log` |
+| `*` | any number of characters, including none | `app*.log` | `app.log`, `app-2026-10-20.log` | `other.log` |
+| `[...]` | 1 character from the set | `app-[0-9].log` | `app-1.log` | `app-a.log` |
+
+Neither `?` nor `*` matches `/`, so a wildcard never reaches into a subfolder. The syntax is Go's `filepath.Match`. A path containing any of `* ? [` is a wildcard; anything else is an exact path, unchanged.
+
+| Real file | Pattern |
+|---|---|
+| `app-2026-10-20.log` | `app-????-??-??.log` |
+| `app_20261020.log` | `app_????????.log` |
+| `postgresql_prod_logs_2026-10-20.log` | `postgresql_prod_logs*.log` |
 
 - The tailer follows the **newest** matching file by modification time. At startup it starts at the end of that file, like an exact path.
 - Every ~5 s it looks for a newer match. When one appears, it finishes the current file, then reads the new one **from its start**, so the first lines of the day are kept.
