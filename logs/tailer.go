@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -32,7 +33,10 @@ type Publisher interface {
 }
 
 type Tailer struct {
-	path      string
+	pattern   string // configured path; a glob when it holds * ? or [
+	glob      bool
+	path      string          // file currently followed — the pattern itself for an exact path
+	left      map[uint64]bool // inodes of glob matches switched away from, never reopened
 	channel   string
 	identity  config.IdentityConfig
 	publisher Publisher
@@ -43,7 +47,10 @@ type Tailer struct {
 
 func New(path, channel string, identity config.IdentityConfig, publisher Publisher) *Tailer {
 	return &Tailer{
+		pattern:   path,
+		glob:      strings.ContainsAny(path, "*?["),
 		path:      path,
+		left:      make(map[uint64]bool),
 		channel:   channel,
 		identity:  identity,
 		publisher: publisher,
@@ -53,7 +60,7 @@ func New(path, channel string, identity config.IdentityConfig, publisher Publish
 // Run tails the file and ships each complete line to Redis Pub/Sub.
 // Returns when ctx is cancelled (graceful shutdown).
 func (t *Tailer) Run(ctx context.Context) {
-	slog.Info("Starting log tailer", "path", t.path, "channel", t.channel)
+	slog.Info("Starting log tailer", "path", t.pattern, "channel", t.channel)
 
 	var (
 		f             *os.File
@@ -62,6 +69,7 @@ func (t *Tailer) Run(ctx context.Context) {
 		lineBuffer    bytes.Buffer
 		startAtEnd    = true // first open skips existing content
 		cycle         int
+		switchPending bool // a newer glob match exists; switch once the current file is drained
 		lastHeartbeat = time.Now()
 	)
 
@@ -90,7 +98,16 @@ func (t *Tailer) Run(ctx context.Context) {
 
 		// Open file if not already open
 		if f == nil {
-			if _, err := os.Stat(t.path); os.IsNotExist(err) {
+			switchPending = false
+			if t.glob {
+				newest, _ := t.newestMatch()
+				if newest == "" {
+					slog.Warn("Waiting for a log file matching the pattern", "pattern", t.pattern)
+					sleep(ctx, waitForFileDelay)
+					continue
+				}
+				t.path = newest
+			} else if _, err := os.Stat(t.path); os.IsNotExist(err) {
 				slog.Warn("Waiting for log file to appear", "path", t.path)
 				sleep(ctx, waitForFileDelay)
 				continue
@@ -104,6 +121,9 @@ func (t *Tailer) Run(ctx context.Context) {
 				continue
 			}
 			startAtEnd = false
+			if t.glob {
+				slog.Info("Following log file", "pattern", t.pattern, "path", t.path)
+			}
 		}
 
 		cycle++
@@ -123,6 +143,9 @@ func (t *Tailer) Run(ctx context.Context) {
 				f = nil
 				lineBuffer.Reset()
 				continue
+			}
+			if t.glob && !switchPending {
+				switchPending = t.hasNewerMatch(f)
 			}
 		}
 
@@ -186,6 +209,17 @@ func (t *Tailer) Run(ctx context.Context) {
 			}
 		}
 
+		// The current file is drained — move to the newer match, read from its
+		// start. Lines written to the old file after this point are dropped.
+		if switchPending {
+			slog.Info("Newer log file matches the pattern, switching", "pattern", t.pattern, "from", t.path)
+			t.left[fileIno] = true
+			f.Close()
+			f = nil
+			lineBuffer.Reset()
+			continue
+		}
+
 		sleep(ctx, pollInterval)
 	}
 }
@@ -222,6 +256,54 @@ func (t *Tailer) hasBeenReplaced(knownIno uint64) (bool, error) {
 		return false, err
 	}
 	return currentIno != knownIno, nil
+}
+
+// newestMatch returns the most recently modified file matching the pattern,
+// skipping files already switched away from so a late write to yesterday's
+// file cannot pull the tailer back to re-read it from the start. Ties go to
+// the later name. Returns "" when nothing matches.
+func (t *Tailer) newestMatch() (string, time.Time) {
+	matches, _ := filepath.Glob(t.pattern) // the pattern is validated at config load
+	var (
+		newest  string
+		newestM time.Time
+		present = make(map[uint64]bool, len(matches))
+	)
+	for _, m := range matches {
+		info, err := os.Stat(m)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			continue
+		}
+		present[stat.Ino] = true
+		if t.left[stat.Ino] {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestM) || (info.ModTime().Equal(newestM) && m > newest) {
+			newest, newestM = m, info.ModTime()
+		}
+	}
+	// Forget deleted files so a reused inode number is not mistaken for one
+	for ino := range t.left {
+		if !present[ino] {
+			delete(t.left, ino)
+		}
+	}
+	return newest, newestM
+}
+
+// hasNewerMatch reports whether another file matching the pattern was
+// modified after the one currently open.
+func (t *Tailer) hasNewerMatch(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	newest, mtime := t.newestMatch()
+	return newest != "" && newest != t.path && mtime.After(info.ModTime())
 }
 
 func fileInode(path string) (uint64, error) {

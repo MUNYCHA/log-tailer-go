@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 )
 
@@ -64,6 +65,9 @@ type LogTailerConfig struct {
 	Files   []LogFileConfig `json:"files"`
 }
 
+// LogFileConfig names one log to follow. Path is either an exact file or a
+// glob (* ? [...]) for logs whose name changes, e.g. one file per day — the
+// tailer then follows the newest match.
 type LogFileConfig struct {
 	Path    string `json:"path"`
 	Channel string `json:"channel"`
@@ -164,6 +168,9 @@ func (c *AppConfig) Validate() error {
 		for _, f := range c.LogTailer.Files {
 			if f.Path == "" {
 				return fmt.Errorf("each 'logTailer.files' entry must have a 'path'")
+			}
+			if _, err := filepath.Match(f.Path, ""); err != nil {
+				return fmt.Errorf("'logTailer.files' path %q is not a valid pattern: %w", f.Path, err)
 			}
 			if f.Channel == "" {
 				return fmt.Errorf("each 'logTailer.files' entry must have a 'channel'")

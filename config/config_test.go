@@ -270,3 +270,24 @@ func TestValidate_PostgresEnabled_Valid(t *testing.T) {
 		t.Fatalf("expected valid postgres config to pass, got: %v", err)
 	}
 }
+
+func TestValidate_LogTailer_GlobPathIsValid(t *testing.T) {
+	cfg := validBase()
+	cfg.LogTailer = config.LogTailerConfig{Enabled: true, Files: []config.LogFileConfig{
+		{Path: "/var/log/app/app.log", Channel: "exact"},
+		{Path: "/var/log/app/app-????-??-??.log", Channel: "daily"},
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected exact and glob paths to be valid, got: %v", err)
+	}
+}
+
+func TestValidate_LogTailer_BadPattern(t *testing.T) {
+	cfg := validBase()
+	cfg.LogTailer = config.LogTailerConfig{Enabled: true, Files: []config.LogFileConfig{
+		{Path: "/var/log/app/app-[.log", Channel: "broken"},
+	}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for unclosed '[' in logTailer path, got nil")
+	}
+}

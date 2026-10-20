@@ -445,3 +445,91 @@ func TestShutdownStopsPromptly(t *testing.T) {
 		t.Fatal("Run did not return within 2 s of context cancel")
 	}
 }
+
+// setMtime backdates a file so "newest match" is decided by the test, not by
+// how fast files happened to be created.
+func setMtime(t *testing.T, path string, ago time.Duration) {
+	t.Helper()
+	at := time.Now().Add(-ago)
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGlobFollowsNewestMatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	older := filepath.Join(dir, "app-2026-10-19.log")
+	newer := filepath.Join(dir, "app-2026-10-20.log")
+	createFile(t, older, "")
+	createFile(t, newer, "")
+	setMtime(t, older, time.Hour)
+
+	pub := &fakePublisher{}
+	startTailer(t, filepath.Join(dir, "app-*.log"), pub)
+	waitForOpen()
+
+	appendToFile(t, older, "from-older\n")
+	appendToFile(t, newer, "from-newer\n")
+
+	pub.waitForMessages(t, 1, fastWait)
+	time.Sleep(600 * time.Millisecond) // a stray line from the older file would land here
+	expectMessages(t, pub.messages(), []string{"from-newer"})
+
+	// The event carries the real file, not the pattern
+	if ev := pub.allEvents()[0]; ev.Path != newer {
+		t.Errorf("Path = %q, want %q", ev.Path, newer)
+	}
+}
+
+func TestGlobSwitchesToNewFileFromStart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	today := filepath.Join(dir, "app-2026-10-20.log")
+	tomorrow := filepath.Join(dir, "app-2026-10-21.log")
+	createFile(t, today, "")
+	setMtime(t, today, time.Minute)
+
+	pub := &fakePublisher{}
+	startTailer(t, filepath.Join(dir, "app-*.log"), pub)
+	waitForOpen()
+
+	appendToFile(t, today, "today-1\n")
+	pub.waitForMessages(t, 1, fastWait)
+
+	// Lines already in the new file when it is found must not be skipped
+	createFile(t, tomorrow, "tomorrow-1\ntomorrow-2\n")
+
+	got := pub.waitForMessages(t, 3, slowWait)
+	expectMessages(t, got, []string{"today-1", "tomorrow-1", "tomorrow-2"})
+
+	if ev := pub.allEvents()[2]; ev.Path != tomorrow {
+		t.Errorf("Path = %q, want %q", ev.Path, tomorrow)
+	}
+
+	// A late write to the old file must not pull the tailer back to re-read it
+	appendToFile(t, today, "late-today\n")
+	time.Sleep(6 * time.Second) // past one ~5 s match check
+	appendToFile(t, tomorrow, "tomorrow-3\n")
+
+	got = pub.waitForMessages(t, 4, fastWait)
+	expectMessages(t, got, []string{"today-1", "tomorrow-1", "tomorrow-2", "tomorrow-3"})
+}
+
+func TestGlobWaitsForFirstMatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	pub := &fakePublisher{}
+	startTailer(t, filepath.Join(dir, "app-*.log"), pub) // nothing matches yet
+
+	time.Sleep(1500 * time.Millisecond)
+	path := filepath.Join(dir, "app-2026-10-20.log")
+	createFile(t, path, "")
+	time.Sleep(2500 * time.Millisecond)
+
+	appendToFile(t, path, "first-line\n")
+
+	got := pub.waitForMessages(t, 1, fastWait)
+	expectMessages(t, got, []string{"first-line"})
+}
