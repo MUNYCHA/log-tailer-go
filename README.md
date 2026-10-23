@@ -6,6 +6,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 
 - Tails one or more log files concurrently, starting at the end of each file — only lines written after startup are shipped
 - Detects log rotation, truncation, and file disappearance — auto-recovers without manual intervention
+- Follows logs whose name changes (e.g. one file per day) via a wildcard `path` — see [Changing file names](#changing-file-names)
 - Publishes each line as a JSON event to a Redis Pub/Sub channel
 - Drains bursts at full speed — no polling gap while behind, then back to a relaxed 200 ms poll
 - Bursts are published as pipelined batches (one round trip per 64 KB read chunk), sustaining 50k+ lines/s per file while staying synchronous — no internal queues
@@ -54,7 +55,7 @@ log-tailer-go/
 ├── redis/
 │   └── publisher.go     — Redis Pub/Sub publisher
 ├── logs/
-│   ├── tailer.go        — follows one log file, handles rotation/truncation, publishes each line
+│   ├── tailer.go        — follows one log file (or the newest wildcard match), handles rotation/truncation, publishes each line
 │   └── tailer_test.go
 ├── resources/
 │   ├── collector.go     — every interval: runs read → parse → calculate for each metric
@@ -120,11 +121,49 @@ Each log line is published as a JSON object:
 }
 ```
 
+`path` is the real file the line came from — for a wildcard entry, the matched file (`/var/log/app/app-2026-10-20.log`), not the pattern.
+
 Every event opens with `serverId`, the id of the server it came from, so a consumer extracts identity the same way on every channel and joins on one field. It is the only identity an event carries: a hostname, address or the system a server belongs to is looked up from that id on the consumer side, rather than copied onto every event where it would go stale. The heartbeat carries `serverId` and nothing else.
 
 Consume with `SUBSCRIBE your-channel-1` (or `PSUBSCRIBE your-channel-*` for all channels). Note that Redis Pub/Sub has no persistence: messages published while no subscriber is connected are discarded.
 
 `message` is the raw line with its trailing newline removed; a BOM and any `\r` are stripped, but leading and trailing spaces are preserved so indented stack traces survive intact. Empty lines are skipped entirely (a whitespace-only line is still published). A line longer than 1 MB is published as a 1 MB chunk and the remainder continues in the next event, so a runaway line can't grow the buffer without bound.
+
+### Changing file names
+
+For a log that gets a new name every day, put a wildcard in `path` instead of the exact name:
+
+```yaml
+logTailer:
+  files:
+    - path: /var/log/nginx/access.log                      # exact — works as before
+      channel: nginx-logs
+    - path: /var/log/app/app-????-??-??.log                # wildcard — follows the newest match
+      channel: app-logs
+```
+
+Copy the real file name and replace only the part that changes. Everything else must match the real name exactly, including `-`, `_` and `.`.
+
+| Symbol | Matches | Example | Matches | Doesn't match |
+|---|---|---|---|---|
+| `?` | exactly 1 character — letter, digit or sign | `app?log` | `app-log`, `app_log`, `app1log` | `applog`, `app--log` |
+| `*` | any number of characters, including none | `app*.log` | `app.log`, `app-2026-10-20.log` | `other.log` |
+| `[...]` | 1 character from the set | `app-[0-9].log` | `app-1.log` | `app-a.log` |
+
+Neither `?` nor `*` matches `/`, so a wildcard never reaches into a subfolder. The syntax is Go's `filepath.Match`. A path containing any of `* ? [` is a wildcard; anything else is an exact path, unchanged.
+
+| Real file | Pattern |
+|---|---|
+| `app-2026-10-20.log` | `app-????-??-??.log` |
+| `app_20261020.log` | `app_????????.log` |
+| `postgresql_prod_logs_2026-10-20.log` | `postgresql_prod_logs*.log` |
+
+- The tailer follows the **newest** matching file by modification time. At startup it starts at the end of that file, like an exact path.
+- Every ~5 s it looks for a newer match. When one appears, it finishes the current file, then reads the new one **from its start**, so the first lines of the day are kept.
+- It never goes back to a file it switched away from: lines written to yesterday's file after the switch are dropped rather than re-reading that file from the beginning.
+- Only one file per entry is followed at a time. Logs written to several files at once need one entry per file.
+
+Keep each pattern tight. `app-????-??-??.log` matches only the daily files; `*.log` would also match unrelated logs, and whichever was written last would be followed. Two entries whose patterns match the same file both ship its lines, so each line arrives twice.
 
 ### Resources
 
@@ -496,7 +535,7 @@ A value the agent cannot read is **left out of the JSON entirely** — never sen
 
 Config is JSON or YAML — picked automatically by the file's extension (`.json`, or `.yaml`/`.yml`). Both formats use the same fields. YAML is parsed strictly: an unknown or misspelled key is a startup error. JSON is not — unknown keys there are ignored silently.
 
-The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` and `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled, `docker.channel` and a positive `docker.interval` when docker is enabled, and `database.postgres.channel` and a positive `database.postgres.interval` when postgres is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, no `docker`, no `database.postgres`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
+The config is validated at startup and any failure exits non-zero rather than running degraded. `redis.addr` and `identity.serverId` are always required; `logTailer.files` (each with a `path` that is a valid pattern, and a `channel`) is required when the tailer is enabled, `resources.channel` and a positive `resources.interval` when resources is enabled, `storage.channel`, a positive `storage.interval` and non-empty `storage.mounts` entries (the list itself may be empty) when storage is enabled, `docker.channel` and a positive `docker.interval` when docker is enabled, and `database.postgres.channel` and a positive `database.postgres.interval` when postgres is enabled. Enabling nothing at all — no `logTailer`, no `resources`, no `storage`, no `docker`, no `database.postgres`, and `heartbeat.enabled: false` — is also an error, since there would be nothing to do.
 
 Every collector publishes its first event one second after the agent starts and then follows its own interval, instead of staying silent until a whole interval has passed — on a 30s interval that silence is long enough for a consumer expiring the heartbeat at ~3 beats to be most of the way to declaring the server down. All of them wait the same second, so the first heartbeat, resources, storage, docker and postgres events go out together. `resources`, `docker` and `postgres` spend that second taking the baseline reading their rates are differenced against, so their first events are complete rather than missing `cpu.usedPercent`, `network`, `cpuPercent` and `activity`. An interval shorter than a second is not delayed by it.
 
@@ -517,7 +556,7 @@ cp config/config.example.yaml config/config.yaml
 | `redis.db` | Redis database number (Pub/Sub ignores it; kept for client completeness) |
 | `identity.serverId` | Unique server identifier, any non-empty string (stable; published in every event as `serverId`) |
 | `logTailer.enabled` | Enable or disable the tailer |
-| `logTailer.files` | List of `{ path, channel }` entries to tail |
+| `logTailer.files` | List of `{ path, channel }` entries to tail; `path` may hold a wildcard (`* ? [`) to follow the newest matching file |
 | `resources.enabled` | Enable or disable the resources collector |
 | `resources.channel` | Redis Pub/Sub channel for resources events |
 | `resources.interval` | Collection interval, as a Go duration string (e.g. `"30s"`) |

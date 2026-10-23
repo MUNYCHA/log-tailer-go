@@ -8,11 +8,18 @@ identity:
 
 logTailer:
   enabled: true
+  # path is an exact file, or a wildcard for a name that changes (e.g. daily):
+  #   ?  exactly 1 character    *  any characters    never matches /
+  # A wildcard follows only the newest matching file. See README.
   files:
-    - path: /var/log/app/app.log
+    - path: /var/log/app/app.log                # exact
       channel: your-channel-1
-    - path: /var/log/app/error.log
+    - path: /var/log/app/error.log              # exact
       channel: your-channel-2
+    - path: /var/log/app/daily-????-??-??.log   # matches daily-2026-10-20.log
+      channel: your-channel-3
+    - path: /var/log/app/worker*.log            # matches worker.log, worker-1.log
+      channel: your-channel-4
 
 resources:
   enabled: true

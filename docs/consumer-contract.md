@@ -75,6 +75,11 @@ One event per log line. Fixed shape — every field is always present.
 }
 ```
 
+`path` is always the real file the line was read from. When the agent is
+configured with a wildcard, it is the matched file
+(`/var/log/app/app-2026-10-20.log`), never the pattern — so it changes when
+the agent moves to the next day's file, while `channel` stays the same.
+
 There is no degraded form. A line the agent cannot read produces no event at
 all rather than an event with an error in it.
 

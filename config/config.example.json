@@ -13,7 +13,8 @@
     "enabled": true,
     "files": [
       { "path": "/var/log/app/app.log", "channel": "your-channel-1" },
-      { "path": "/var/log/app/error.log", "channel": "your-channel-2" }
+      { "path": "/var/log/app/error.log", "channel": "your-channel-2" },
+      { "path": "/var/log/app/daily-????-??-??.log", "channel": "your-channel-3" }
     ]
   },
 
