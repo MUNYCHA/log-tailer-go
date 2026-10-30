@@ -111,21 +111,72 @@ func TestFind_NoEntries(t *testing.T) {
 	}
 }
 
-func TestIsLocalAndIsNetwork(t *testing.T) {
+func TestIsLocal(t *testing.T) {
 	for _, fs := range []string{"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat"} {
-		if !IsLocal(fs) || IsNetwork(fs) {
-			t.Fatalf("expected %s local only", fs)
+		if !IsLocal(fs) {
+			t.Fatalf("expected %s local", fs)
 		}
 	}
-	for _, fs := range []string{"nfs", "nfs4", "cifs", "smb3", "ceph", "glusterfs", "fuse.sshfs", "9p"} {
-		if !IsNetwork(fs) || IsLocal(fs) {
-			t.Fatalf("expected %s network only", fs)
+	for _, fs := range []string{"nfs4", "cifs", "9p", "tmpfs", "proc", "overlay", "squashfs", "iso9660", "zfs", ""} {
+		if IsLocal(fs) {
+			t.Fatalf("expected %s not local", fs)
 		}
 	}
-	for _, fs := range []string{"tmpfs", "proc", "overlay", "squashfs", "iso9660", "zfs", ""} {
-		if IsLocal(fs) || IsNetwork(fs) {
-			t.Fatalf("expected %s to be neither local nor network", fs)
+}
+
+func TestHasWildcard(t *testing.T) {
+	for _, p := range []string{"/mnt/*", "/srv/share-?", "/mnt/nas[12]"} {
+		if !HasWildcard(p) {
+			t.Fatalf("expected %q to be a wildcard", p)
 		}
+	}
+	for _, p := range []string{"/", "/mnt/nas", "/var/log"} {
+		if HasWildcard(p) {
+			t.Fatalf("expected %q to be a plain path", p)
+		}
+	}
+}
+
+func TestMatch(t *testing.T) {
+	table := []Entry{
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "nas:/b", Path: "/mnt/nfs/b", FSType: "nfs4"},
+		{Device: "nas:/a", Path: "/mnt/nfs/a", FSType: "nfs4"},
+		{Device: "nas:/a/deep", Path: "/mnt/nfs/a/deep", FSType: "nfs4"},
+		{Device: "//win/share", Path: "/mnt/nfsish", FSType: "cifs"},
+		// autofs trigger with the real mount on top: reported as the real one
+		{Device: "systemd-1", Path: "/mnt/nfs/c", FSType: "autofs"},
+		{Device: "nas:/c", Path: "/mnt/nfs/c", FSType: "nfs"},
+		// autofs trigger with nothing mounted: never matched
+		{Device: "systemd-1", Path: "/mnt/nfs/d", FSType: "autofs"},
+	}
+
+	got := Match(table, "/mnt/nfs/*")
+	want := []Entry{
+		{Device: "nas:/a", Path: "/mnt/nfs/a", FSType: "nfs4"},
+		{Device: "nas:/b", Path: "/mnt/nfs/b", FSType: "nfs4"},
+		{Device: "nas:/c", Path: "/mnt/nfs/c", FSType: "nfs"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
+	}
+
+	if got := Match(table, "/mnt/nfs?"); len(got) != 0 {
+		t.Fatalf("expected ? to match exactly one character, got %v", got)
+	}
+	if got := Match(table, "/mnt/nfs*"); len(got) != 1 || got[0].Path != "/mnt/nfsish" {
+		t.Fatalf("expected only /mnt/nfsish, got %v", got)
+	}
+	if got := Match(table, "/srv/*"); len(got) != 0 {
+		t.Fatalf("expected no matches, got %v", got)
+	}
+	if got := Match(nil, "/mnt/*"); len(got) != 0 {
+		t.Fatalf("expected no matches on an empty table, got %v", got)
 	}
 }
 

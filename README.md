@@ -18,7 +18,7 @@ A lightweight log file tailer that reads log files and publishes each line to Re
 - Structured logging via `log/slog`
 - Config file may be JSON or YAML, auto-detected by extension
 - Optional resources collector publishes server uptime, load average, CPU utilisation, memory/swap and network throughput as one JSON event on its own timer
-- Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts as a separate JSON event on its own timer, so a slow disk never delays the resources event
+- Optional storage collector publishes the server's total local storage plus disk usage for the configured mounts — local or network (NFS, CIFS, …), exact paths or wildcards like `/mnt/nfs/*` — as a separate JSON event on its own timer, so a slow disk never delays the resources event and a dead NAS never delays the storage event
 - Optional docker collector publishes every container on the server as one JSON event: the `docker stats` figures (CPU, memory, network, block I/O, PIDs) for running containers and the last exit code and time for stopped ones. It is strictly read-only: every request to the Docker socket passes an allow-list that only lets four `GET`s through, so the agent can never stop, remove or exec into a container
 - Optional postgres collector publishes the health of the local Postgres as one JSON event: whether it is up, connections, long-running and blocked sessions, replication, and per-database size, XID age, activity, cache hit ratio, largest tables and dead tuples. It logs in over the Unix socket with peer authentication, so there is no password to store, and its sessions are read-only with short statement and lock timeouts, so it can fail but never slow the database down
 - Heartbeat (on by default) publishes a fixed liveness beat on its own ticker, reading nothing and sharing no state with the collectors, so a wedged storage read can't make a healthy server look down
@@ -70,7 +70,7 @@ log-tailer-go/
 │   ├── collector.go     — every interval: reads the mount table, builds the server total
 │   │                      and each configured mount, publishes one storage event
 │   ├── collector_test.go
-│   ├── mounts/          — /proc/self/mounts → device, fsType, local or network per path; unique local filesystems
+│   ├── mounts/          — /proc/self/mounts → device and fsType per path, wildcard matches, unique local filesystems
 │   └── disk/            — statfs → total/used/free/reserved bytes, used %; server-wide total
 ├── docker/
 │   ├── collector.go     — every interval: lists containers, reads stats for running ones and
@@ -265,7 +265,9 @@ When `storage.enabled` is `true`, the server's total local storage and the disk 
   "mounts": [
     { "path": "/", "device": "/dev/sda1", "fsType": "ext4", "totalBytes": 214748364800, "usedBytes": 52428800000, "freeBytes": 151582326374, "reservedBytes": 10737238426, "usedPercent": 25.7 },
     { "path": "/var/log", "device": "/dev/sdb1", "fsType": "xfs", "totalBytes": 10737418240, "usedBytes": 1073741824, "freeBytes": 9126805504, "reservedBytes": 536870912, "usedPercent": 10.53 },
-    { "path": "/mnt/nas", "fsType": "nfs4", "error": "network filesystem not supported" },
+    { "path": "/mnt/nfs/backup", "device": "nas1:/volume1/backup", "fsType": "nfs4", "pattern": "/mnt/nfs/*", "totalBytes": 3998614552576, "usedBytes": 1999307276288, "freeBytes": 1999307276288, "reservedBytes": 0, "usedPercent": 50 },
+    { "path": "/mnt/nfs/media", "device": "nas2:/media", "fsType": "nfs4", "pattern": "/mnt/nfs/*", "error": "timeout" },
+    { "path": "/srv/share-*", "pattern": "/srv/share-*", "error": "no mounts match" },
     { "path": "/missing", "error": "no such file or directory" }
   ]
 }
@@ -314,34 +316,53 @@ Values come from `statfs` and match `df -B1` column for column:
 
 A consumer can then say which filesystem is absent without reading the agent's log, and can tell a missing filesystem apart from storage that really shrank. `missingPaths` is omitted entirely when `partial` is false. The failure is also logged, once when it starts and once when it clears.
 
-The total measures mounted, usable storage — not the size of the physical disks: unmounted partitions, swap partitions and unallocated LVM space are not counted. On ext4 and xfs (with or without LVM or mdadm) it equals the sum of `df` for each disk. btrfs figures are the kernel's own estimate, as in `df`. A filesystem type outside the list above is not counted. Network filesystems are never touched, so the total can't block on a dead remote server.
+The total measures mounted, usable storage — not the size of the physical disks: unmounted partitions, swap partitions and unallocated LVM space are not counted. On ext4 and xfs (with or without LVM or mdadm) it equals the sum of `df` for each disk. btrfs figures are the kernel's own estimate, as in `df`. A filesystem type outside the list above is not counted. Network filesystems are never touched by the total, even when listed in `storage.mounts`: a share mounted on several servers would otherwise be counted on each.
 
 #### Mounts
+
+Each `storage.mounts` entry is either an exact path or a wildcard:
+
+```yaml
+storage:
+  mounts:
+    - /                 # exact path
+    - /var/log          # exact path, reports the filesystem it lives on
+    - /mnt/nfs/*        # every mount point directly under /mnt/nfs
+    - /srv/share-?      # /srv/share-a, /srv/share-b, ...
+```
+
+A wildcard is matched against the **mount points in `/proc/self/mounts`**, never against the directories on disk: listing a directory on a dead NAS could hang. So `/mnt/nfs/*` matches only what is mounted there, not plain folders. The syntax is the same as for log paths (`* ? [`, Go's `filepath.Match`); `*` never matches `/`, so `/mnt/*` holds `/mnt/a` but not `/mnt/a/b`. Each match is its own entry, sorted by path, with `pattern` set to the config line it came from. An autofs mount point with nothing mounted on it is skipped, so the agent never triggers an automount.
 
 Mounts are reported in config order. A path doesn't have to be a mount point: `/var/log` reports the filesystem it lives on. `device` and `fsType` come from `/proc/self/mounts`, read once per tick — the entry whose mount point is the longest whole-component match for the path. Two paths on the same disk device (for example both `/dev/sda1`) share that disk, so filling one fills the other.
 
 A path is matched as written; symlinks are not resolved, since resolving would touch every component of the path and could block on a dead network mount.
 
-When a path has no reading, it is published with only an `error`, never with zero sizes that would read as an empty disk:
+A mount point named by more than one entry (an exact path and a wildcard, or two wildcards) is reported once, under the first.
+
+When a path has no reading, it is published with an `error`, never with zero sizes that would read as an empty disk. Only a timeout keeps `device` and `fsType`, so the event names the NAS that is down:
 
 | Case | Published |
 |---|---|
 | Path can't be statted (doesn't exist, permission denied) | `{ path, error }` |
-| Path is on a network filesystem (`nfs`, `nfs4`, `cifs`, `smb3`, `ceph`, `glusterfs`, `fuse.sshfs`, `9p`) | `{ path, fsType, error: "network filesystem not supported" }` |
+| `statfs` didn't answer within 2 s (e.g. the NAS is down) | `{ path, device, fsType, error: "timeout" }` |
+| Wildcard matched no mount point | `{ path: <pattern>, pattern, error: "no mounts match" }` |
+| Wildcard, but the mount table can't be read | `{ path: <pattern>, pattern, error: "mount table unreadable" }` |
 
 A failing path is logged once when it starts failing and once when it becomes readable again, not on every tick, so a typo'd path doesn't flood the journal.
 
-Network paths are **never statted**: `statfs` on a mount whose server is down can block until the server answers, which would hold up the whole storage event. The rest of the mounts still publish normally.
+Network mounts are statted like any other path, but every `statfs` is waited for **at most 2 seconds**. `statfs` has no timeout of its own: on a mount whose server is down it can block until the server answers, and nothing can cancel it. So a call that runs over is left pending in the background and the path is published with `error: "timeout"`; the rest of the mounts publish normally. While that call is still stuck, later ticks report `timeout` straight away without starting another, so a dead NAS costs one blocked thread and delays only the first tick it hangs on. When the NAS answers, the next tick reports real usage again.
 
-Only network filesystems are refused. Any other configured path is reported, including RAM-backed ones such as a `tmpfs` `/tmp`, even though those are left out of the `server` total.
+The numbers for a network mount are the NAS's own, exactly what `df` shows on this server. If the NAS exports a folder rather than a whole volume, they are the volume's size, so several shares on one volume report the same figures; a share mounted on several servers is reported by each of them.
 
-If the mount table itself can't be read, paths are statted without `device`, `fsType` or the network check, and `server` is omitted.
+Any configured path is reported, including RAM-backed ones such as a `tmpfs` `/tmp`, even though those are left out of the `server` total.
+
+If the mount table itself can't be read, exact paths are statted without `device` or `fsType`, wildcards are published with `error: "mount table unreadable"`, and `server` is omitted.
 
 A path that is an empty mount point with nothing mounted on it reports the filesystem it sits on (usually `/`), exactly as `df` would.
 
 `storage.mounts` may be empty, in which case `mounts` is published as `[]` and `server` is still reported.
 
-Storage runs as its own component, separate from resources, so a `statfs` stuck on a dead mount only delays the storage event — CPU, memory and the heartbeat keep publishing.
+Storage runs as its own component, separate from resources, so a slow `statfs` only delays the storage event — CPU, memory and the heartbeat keep publishing.
 
 ### Docker
 
@@ -563,7 +584,7 @@ cp config/config.example.yaml config/config.yaml
 | `storage.enabled` | Enable or disable the storage collector |
 | `storage.channel` | Redis Pub/Sub channel for storage events |
 | `storage.interval` | Collection interval, as a Go duration string (e.g. `"5m"`) |
-| `storage.mounts` | Optional list of mount paths to report disk usage for |
+| `storage.mounts` | Optional list of paths to report disk usage for, local or network; a path may hold a wildcard (`* ? [`) to report every mount point it matches |
 | `docker.enabled` | Enable or disable the docker collector. There is no container list to configure: the event reports every container Docker has |
 | `docker.channel` | Redis Pub/Sub channel for docker events |
 | `docker.interval` | Collection interval, as a Go duration string (e.g. `"30s"`) |

@@ -222,7 +222,8 @@ always exact.
 ## storage
 
 One event per interval: a server-wide total plus one entry per configured
-mount.
+mount. A configured wildcard (e.g. `/mnt/nfs/*`) becomes one entry per mount
+point it matches, each with `pattern` set to the wildcard.
 
 ### Normal
 
@@ -301,7 +302,8 @@ of** the five size fields:
 {
   "mounts": [
     { "path": "/", "device": "/dev/sda1", "fsType": "ext4", "totalBytes": 1081101176832, "usedBytes": 49485991936, "freeBytes": 976622829568, "reservedBytes": 54992355328, "usedPercent": 4.82 },
-    { "path": "/mnt/nas", "fsType": "nfs4", "error": "network filesystem not supported" },
+    { "path": "/mnt/nfs/media", "device": "nas2:/media", "fsType": "nfs4", "pattern": "/mnt/nfs/*", "error": "timeout" },
+    { "path": "/srv/share-*", "pattern": "/srv/share-*", "error": "no mounts match" },
     { "path": "/mnt/data", "error": "no such file or directory" }
   ]
 }
@@ -311,8 +313,18 @@ The sizes are omitted rather than zeroed, because a zeroed row reads as a disk
 that is empty. Branch on the presence of `error`, or equivalently on the
 absence of `totalBytes`.
 
-A path on a network filesystem is reported with a fixed `error` and is never
-statted, so an unreachable NFS server cannot delay the event.
+Network mounts (NFS, CIFS, …) are read like local ones. One that does not
+answer within 2 s — typically a NAS that is down — is published with
+`error: "timeout"`, and keeps reporting it every tick until the NAS answers.
+A wildcard that matches no mount point is published once, with `path` and
+`pattern` both set to the wildcard and `error: "no mounts match"` (or
+`"mount table unreadable"`), so a share that dropped off shows as missing
+rather than vanishing from the list.
+
+A network mount's sizes are the NAS's, as `df` shows them. The same share
+mounted on several servers is reported by each, and several shares on one NAS
+volume report the same figures, so never sum network mounts across entries or
+servers.
 
 ### Nothing readable
 
@@ -333,7 +345,8 @@ there as an empty list — it is a list, and lists are always present.
 |---|---|
 | `server` | no local filesystem could be read, or the mount table is unreadable |
 | `server.missingPaths` | the total is complete (`partial` is `false`) |
-| `mounts[].device`, `mounts[].fsType` | that path was not found in the mount table |
+| `mounts[].device`, `mounts[].fsType` | that path was not found in the mount table, or it failed with an `error` other than `timeout` |
+| `mounts[].pattern` | the entry was configured as an exact path, not a wildcard |
 | `mounts[].totalBytes` … `usedPercent` | that path could not be read — `error` is present instead |
 | `mounts[].error` | that path was read successfully |
 

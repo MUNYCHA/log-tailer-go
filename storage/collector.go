@@ -11,8 +11,10 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
+	"syscall"
 	"time"
 
 	"log-tailer-go/config"
@@ -40,7 +42,25 @@ type Collector struct {
 	// Only ever touched from Run's goroutine, so they need no lock.
 	failing      map[string]bool
 	mountFailing map[string]bool
+
+	// stat is disk.Read, swapped in tests for one that blocks like a dead NAS.
+	// pending holds the statfs calls that outlived statTimeout, by path, so a
+	// path whose call is still stuck is not statted again. Like the maps
+	// above, only touched from Run's goroutine.
+	stat        func(path string) (syscall.Statfs_t, error)
+	statTimeout time.Duration
+	pending     map[string]chan statResult
 }
+
+type statResult struct {
+	stat syscall.Statfs_t
+	err  error
+}
+
+// statTimeout is how long one configured path's statfs is waited for. A
+// local disk answers in microseconds; a network mount whose server is down
+// may not answer at all.
+const statTimeout = 2 * time.Second
 
 func New(mounts []string, channel string, identity config.IdentityConfig, interval time.Duration, publisher Publisher) *Collector {
 	return &Collector{
@@ -51,6 +71,9 @@ func New(mounts []string, channel string, identity config.IdentityConfig, interv
 		publisher:    publisher,
 		failing:      make(map[string]bool),
 		mountFailing: make(map[string]bool),
+		stat:         disk.Read,
+		statTimeout:  statTimeout,
+		pending:      make(map[string]chan statResult),
 	}
 }
 
@@ -83,17 +106,11 @@ func (c *Collector) Run(ctx context.Context) {
 func (c *Collector) collectAndPublish(ctx context.Context) {
 	table := readMountTable()
 
-	// Built non-nil so an empty mounts list publishes [] rather than null
-	usage := make([]model.MountUsage, len(c.mounts))
-	for i, path := range c.mounts {
-		usage[i] = c.mountUsage(table, path)
-	}
-
 	event := model.StorageEvent{
 		ServerID:  c.identity.ServerID,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Server:    c.serverStorage(table),
-		Mounts:    usage,
+		Mounts:    c.mountUsages(table),
 	}
 
 	payload, err := json.Marshal(event)
@@ -110,7 +127,7 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 func readMountTable() []mounts.Entry {
 	data, err := mounts.Read()
 	if err != nil {
-		slog.Warn("Failed to read mount table, reporting mounts without device, fsType or network check", "path", mounts.Path, "error", err)
+		slog.Warn("Failed to read mount table, reporting paths without device or fsType and wildcards unmatched", "path", mounts.Path, "error", err)
 		return nil
 	}
 	return mounts.Parse(data)
@@ -121,7 +138,7 @@ func readMountTable() []mounts.Entry {
 // partial, naming it in MissingPaths so the event says what is absent without
 // the reader having to find the log line; the total is omitted when none can
 // be read. Network filesystems are never in the table's local set, so this
-// never blocks on a dead remote.
+// never touches a remote.
 func (c *Collector) serverStorage(table []mounts.Entry) *model.ServerStorage {
 	var usages []disk.Usage
 	var missing []string
@@ -167,27 +184,76 @@ func (c *Collector) serverStorage(table []mounts.Entry) *model.ServerStorage {
 	}
 }
 
-// errNetworkFS is published for a configured path on a network filesystem.
-const errNetworkFS = "network filesystem not supported"
+// Errors published for a configured path that has no reading.
+const (
+	errNoMatch      = "no mounts match"
+	errNoMountTable = "mount table unreadable"
+)
 
-// mountUsage reports one configured path. A path that can't be statted is
-// still listed, with Error set, so the consumer sees it is down rather than
-// missing; the failure is logged once when it starts and once when it clears.
-// A path on a network filesystem is never statted: statfs there can block
-// until the remote server answers, which would hold up the whole event.
-func (c *Collector) mountUsage(table []mounts.Entry, path string) model.MountUsage {
-	entry, found := mounts.Find(table, path)
-	if found && mounts.IsNetwork(entry.FSType) {
-		return model.MountUsage{Path: path, FSType: entry.FSType, Error: errNetworkFS}
+// errStatTimeout is a statfs that did not answer within statTimeout.
+var errStatTimeout = errors.New("timeout")
+
+// mountUsages reports every configured path in config order. A wildcard path
+// expands to one entry per mount point it matches, each carrying the pattern;
+// a mount point listed by more than one config entry is reported once, under
+// the first.
+func (c *Collector) mountUsages(table []mounts.Entry) []model.MountUsage {
+	// Built non-nil so an empty mounts list publishes [] rather than null
+	usage := make([]model.MountUsage, 0, len(c.mounts))
+	seen := make(map[string]bool, len(c.mounts))
+	add := func(u model.MountUsage) {
+		if !seen[u.Path] {
+			seen[u.Path] = true
+			usage = append(usage, u)
+		}
 	}
 
-	stat, err := disk.Read(path)
+	for _, path := range c.mounts {
+		if !mounts.HasWildcard(path) {
+			add(c.mountUsage(table, path))
+			continue
+		}
+
+		// A pattern with nothing to show is still listed, so a share that
+		// dropped off reads as missing rather than vanishing from the event
+		if table == nil {
+			add(model.MountUsage{Path: path, Pattern: path, Error: errNoMountTable})
+			continue
+		}
+		matches := mounts.Match(table, path)
+		if len(matches) == 0 {
+			add(model.MountUsage{Path: path, Pattern: path, Error: errNoMatch})
+			continue
+		}
+		for _, m := range matches {
+			u := c.mountUsage(table, m.Path)
+			u.Pattern = path
+			add(u)
+		}
+	}
+	return usage
+}
+
+// mountUsage reports one path. A path that can't be statted is still listed,
+// with Error set, so the consumer sees it is down rather than missing; the
+// failure is logged once when it starts and once when it clears. A timeout
+// keeps device and fsType, naming the NAS that is down; any other error
+// drops them, since a missing path would otherwise borrow the device of the
+// mount above it (usually "/").
+func (c *Collector) mountUsage(table []mounts.Entry, path string) model.MountUsage {
+	entry, _ := mounts.Find(table, path)
+
+	stat, err := c.statfs(path)
 	if err != nil {
 		if !c.mountFailing[path] {
-			slog.Warn("Failed to stat mount, reporting as unavailable", "path", path, "error", err)
+			slog.Warn("Failed to stat mount, reporting as unavailable", "path", path, "device", entry.Device, "fsType", entry.FSType, "error", err)
 			c.mountFailing[path] = true
 		}
-		return model.MountUsage{Path: path, Error: err.Error()}
+		failed := model.MountUsage{Path: path, Error: err.Error()}
+		if errors.Is(err, errStatTimeout) {
+			failed.Device, failed.FSType = entry.Device, entry.FSType
+		}
+		return failed
 	}
 	if c.mountFailing[path] {
 		slog.Info("Mount readable again", "path", path)
@@ -206,5 +272,40 @@ func (c *Collector) mountUsage(table []mounts.Entry, path string) model.MountUsa
 			ReservedBytes: usage.ReservedBytes,
 			UsedPercent:   usage.UsedPercent,
 		},
+	}
+}
+
+// statfs stats path but waits at most statTimeout. statfs has no deadline of
+// its own: on a network mount whose server is down it blocks until the
+// server answers, and nothing in Go can cancel it. So the call runs in its
+// own goroutine; on timeout the tick reports errStatTimeout and moves on,
+// leaving the call pending. Until that call returns, later ticks report the
+// timeout at once instead of starting another, so a dead NAS holds one
+// goroutine, not one per tick, and delays only the tick it first hangs on.
+func (c *Collector) statfs(path string) (syscall.Statfs_t, error) {
+	if ch, ok := c.pending[path]; ok {
+		select {
+		case <-ch:
+			// Returned since an earlier tick; that reading is stale, take a new one
+			delete(c.pending, path)
+		default:
+			return syscall.Statfs_t{}, errStatTimeout
+		}
+	}
+
+	ch := make(chan statResult, 1) // buffered, so a late call never blocks sending
+	go func() {
+		stat, err := c.stat(path)
+		ch <- statResult{stat, err}
+	}()
+
+	timer := time.NewTimer(c.statTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r.stat, r.err
+	case <-timer.C:
+		c.pending[path] = ch
+		return syscall.Statfs_t{}, errStatTimeout
 	}
 }

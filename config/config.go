@@ -83,7 +83,8 @@ type ResourcesConfig struct {
 
 // StorageConfig gates the storage event. Mounts lists paths to report one by
 // one and may be empty: the server total is found from the mount table, not
-// from this list.
+// from this list. An entry may be a glob (* ? [...]), e.g. "/mnt/nfs/*", to
+// report every mount point it matches.
 type StorageConfig struct {
 	Enabled  bool     `json:"enabled"`
 	Channel  string   `json:"channel"`
@@ -195,6 +196,9 @@ func (c *AppConfig) Validate() error {
 		for _, m := range c.Storage.Mounts {
 			if m == "" {
 				return fmt.Errorf("each 'storage.mounts' entry must be non-empty")
+			}
+			if _, err := filepath.Match(m, ""); err != nil {
+				return fmt.Errorf("'storage.mounts' entry %q is not a valid pattern: %w", m, err)
 			}
 		}
 	}
