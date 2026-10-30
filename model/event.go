@@ -94,15 +94,21 @@ type ServerStorage struct {
 	MissingPaths []string `json:"missingPaths,omitempty"`
 }
 
-// MountUsage is one configured path: the filesystem it lives on and its usage.
+// MountUsage is one configured path, or one mount point a configured wildcard
+// matched: the filesystem it lives on and its usage.
 type MountUsage struct {
 	Path   string `json:"path"`
 	Device string `json:"device,omitempty"`
 	FSType string `json:"fsType,omitempty"`
 
+	// The configured wildcard this mount point matched. Empty for a path
+	// configured as written. A pattern that matched nothing is published with
+	// Path and Pattern both set to it, and Error.
+	Pattern string `json:"pattern,omitempty"`
+
 	// Nil when the path could not be read, so a failed mount publishes only
-	// its path (and fsType when known) with Error, never zero sizes that
-	// would read as an empty disk
+	// its path (and device and fsType when known) with Error, never zero
+	// sizes that would read as an empty disk
 	*DiskUsage
 
 	Error string `json:"error,omitempty"`

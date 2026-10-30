@@ -96,6 +96,14 @@ func TestValidate_StorageEnabled_EmptyMountEntry(t *testing.T) {
 	}
 }
 
+func TestValidate_StorageEnabled_BadMountPattern(t *testing.T) {
+	cfg := validBase()
+	cfg.Storage = config.StorageConfig{Enabled: true, Channel: "storage-channel", Interval: "5m", Mounts: []string{"/", "/mnt/[nfs"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for a malformed storage.mounts pattern, got nil")
+	}
+}
+
 // The server total comes from the mount table, so no configured mounts is valid
 func TestValidate_StorageEnabled_NoMountsIsValid(t *testing.T) {
 	cfg := validBase()

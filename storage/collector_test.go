@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"log-tailer-go/config"
 	"log-tailer-go/model"
+	"log-tailer-go/storage/disk"
 	"log-tailer-go/storage/mounts"
 )
 
@@ -111,19 +114,104 @@ func TestMountUsage_ErrorOmitsSizesInJSON(t *testing.T) {
 	}
 }
 
-// A network path is reported without calling statfs, so a dead NAS can't
-// block the event. The path doesn't exist, so a statfs would have failed with
-// a different error.
-func TestMountUsage_NetworkFilesystemNotStatted(t *testing.T) {
+// A statfs that hangs like one on a dead NAS times out instead of holding up
+// the event, and while it stays stuck later ticks neither wait again nor start
+// a second call. Once it returns, the next tick takes a fresh reading.
+func TestMountUsage_HungStatTimesOutOnce(t *testing.T) {
 	table := []mounts.Entry{
 		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
-		{Device: "nas:/export", Path: "/no/such/nas", FSType: "nfs4"},
+		{Device: "nas:/export", Path: "/mnt/nas", FSType: "nfs4"},
 	}
+	release := make(chan struct{})
+	var calls atomic.Int32
 	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
-	got := c.mountUsage(table, "/no/such/nas/share")
-	want := model.MountUsage{Path: "/no/such/nas/share", FSType: "nfs4", Error: "network filesystem not supported"}
+	c.statTimeout = 20 * time.Millisecond
+	c.stat = func(path string) (syscall.Statfs_t, error) {
+		if calls.Add(1) == 1 {
+			<-release
+		}
+		return disk.Read("/")
+	}
+
+	got := c.mountUsage(table, "/mnt/nas")
+	want := model.MountUsage{Path: "/mnt/nas", Device: "nas:/export", FSType: "nfs4", Error: "timeout"}
 	if got != want {
 		t.Fatalf("expected %+v, got %+v", want, got)
+	}
+
+	start := time.Now()
+	if got := c.mountUsage(table, "/mnt/nas"); got.Error != "timeout" {
+		t.Fatalf("expected the still-stuck path to report timeout, got %+v", got)
+	}
+	if waited := time.Since(start); waited >= c.statTimeout {
+		t.Fatalf("expected a still-stuck path to report at once, waited %v", waited)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("expected one statfs call while it is stuck, got %d", n)
+	}
+
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for {
+		got := c.mountUsage(table, "/mnt/nas")
+		if got.Error == "" {
+			if got.DiskUsage == nil || got.TotalBytes == 0 {
+				t.Fatalf("expected a reading once the NAS answers, got %+v", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected a reading after the stuck call returned, got %+v", got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("expected the stale result dropped and one fresh call, got %d calls", n)
+	}
+	if len(c.pending) != 0 {
+		t.Fatalf("expected nothing pending after recovery, got %v", c.pending)
+	}
+}
+
+// A wildcard lists every mount point it matches, sorted, each tagged with the
+// pattern; network mounts are statted like any other. A mount point named by
+// two entries is reported once, under the first. A pattern matching nothing
+// is still listed.
+func TestMountUsages_ExpandsWildcards(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a", "b"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	table := []mounts.Entry{
+		{Device: "/dev/sda1", Path: "/", FSType: "ext4"},
+		{Device: "nas:/b", Path: b, FSType: "nfs4"},
+		{Device: "nas:/a", Path: a, FSType: "nfs4"},
+	}
+	pattern := filepath.Join(dir, "*")
+	c := New([]string{b, pattern, "/srv/share-*"}, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
+
+	got := c.mountUsages(table)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries, got %+v", got)
+	}
+	if got[0].Path != b || got[0].Pattern != "" {
+		t.Fatalf("expected the plain path first and untagged, got %+v", got[0])
+	}
+	if got[1].Path != a || got[1].Pattern != pattern || got[1].FSType != "nfs4" || got[1].Device != "nas:/a" || got[1].DiskUsage == nil {
+		t.Fatalf("expected %s read and tagged with the pattern, got %+v", a, got[1])
+	}
+	want := model.MountUsage{Path: "/srv/share-*", Pattern: "/srv/share-*", Error: "no mounts match"}
+	if got[2] != want {
+		t.Fatalf("expected %+v, got %+v", want, got[2])
+	}
+
+	noTable := c.mountUsages(nil)
+	want = model.MountUsage{Path: pattern, Pattern: pattern, Error: "mount table unreadable"}
+	if len(noTable) != 3 || noTable[1] != want {
+		t.Fatalf("expected %+v without a mount table, got %+v", want, noTable)
 	}
 }
 

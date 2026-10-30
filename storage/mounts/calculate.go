@@ -11,23 +11,49 @@ var localTypes = map[string]bool{
 	"ext2": true, "ext3": true, "ext4": true, "xfs": true, "btrfs": true, "vfat": true,
 }
 
-// networkTypes are filesystems served by another machine. statfs on one can
-// block for as long as the remote server is unreachable, so they are never
-// statted.
-var networkTypes = map[string]bool{
-	"nfs": true, "nfs4": true, "cifs": true, "smb3": true, "ceph": true,
-	"glusterfs": true, "fuse.sshfs": true, "9p": true,
-}
-
 // IsLocal reports whether fsType is a local disk filesystem. It is an
 // allowlist: an unknown type is not local.
 func IsLocal(fsType string) bool {
 	return localTypes[fsType]
 }
 
-// IsNetwork reports whether fsType is served over the network.
-func IsNetwork(fsType string) bool {
-	return networkTypes[fsType]
+// HasWildcard reports whether a configured path is a glob pattern (* ? [...])
+// rather than one path.
+func HasWildcard(path string) bool {
+	return strings.ContainsAny(path, "*?[")
+}
+
+// Match returns the mount points matching a glob pattern, sorted by path and
+// each listed once. "*" stays within one path component, so "/mnt/*" holds
+// "/mnt/a" but not "/mnt/a/b".
+//
+// Only the mount table is matched, never the filesystem: filepath.Glob reads
+// directories and could block on a dead network mount. As with Find, when a
+// mount point appears more than once the later entry wins. An autofs mount
+// point with nothing mounted on top is skipped, since statting it would
+// trigger the mount.
+func Match(entries []Entry, pattern string) []Entry {
+	pattern = filepath.Clean(pattern)
+
+	byPath := make(map[string]Entry)
+	for _, e := range entries {
+		path := filepath.Clean(e.Path)
+		if ok, _ := filepath.Match(pattern, path); ok {
+			e.Path = path
+			byPath[path] = e
+		}
+	}
+
+	var matches []Entry
+	for _, e := range byPath {
+		if e.FSType != "autofs" {
+			matches = append(matches, e)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].Path < matches[j].Path
+	})
+	return matches
 }
 
 // Find returns the filesystem a path lives on: the entry whose mount point is
