@@ -33,6 +33,7 @@ storage:
   mounts:                       # optional; the server total works without it
     - /
     - /var/log
+    # - /mnt/nfs/*                # wildcard: every mount point under /mnt/nfs, network ones too
 
 docker:
   enabled: true                 # reads the Docker socket, read-only
