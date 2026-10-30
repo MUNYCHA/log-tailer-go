@@ -345,7 +345,7 @@ there as an empty list — it is a list, and lists are always present.
 |---|---|
 | `server` | no local filesystem could be read, or the mount table is unreadable |
 | `server.missingPaths` | the total is complete (`partial` is `false`) |
-| `mounts[].device`, `mounts[].fsType` | that path was not found in the mount table |
+| `mounts[].device`, `mounts[].fsType` | that path was not found in the mount table, or it failed with an `error` other than `timeout` |
 | `mounts[].pattern` | the entry was configured as an exact path, not a wildcard |
 | `mounts[].totalBytes` … `usedPercent` | that path could not be read — `error` is present instead |
 | `mounts[].error` | that path was read successfully |

@@ -107,7 +107,7 @@ type MountUsage struct {
 	Pattern string `json:"pattern,omitempty"`
 
 	// Nil when the path could not be read, so a failed mount publishes only
-	// its path (and device and fsType when known) with Error, never zero
+	// its path (plus device and fsType on a timeout) with Error, never zero
 	// sizes that would read as an empty disk
 	*DiskUsage
 

@@ -127,7 +127,7 @@ func (c *Collector) collectAndPublish(ctx context.Context) {
 func readMountTable() []mounts.Entry {
 	data, err := mounts.Read()
 	if err != nil {
-		slog.Warn("Failed to read mount table, reporting mounts without device, fsType or network check", "path", mounts.Path, "error", err)
+		slog.Warn("Failed to read mount table, reporting paths without device or fsType and wildcards unmatched", "path", mounts.Path, "error", err)
 		return nil
 	}
 	return mounts.Parse(data)
@@ -236,7 +236,10 @@ func (c *Collector) mountUsages(table []mounts.Entry) []model.MountUsage {
 
 // mountUsage reports one path. A path that can't be statted is still listed,
 // with Error set, so the consumer sees it is down rather than missing; the
-// failure is logged once when it starts and once when it clears.
+// failure is logged once when it starts and once when it clears. A timeout
+// keeps device and fsType, naming the NAS that is down; any other error
+// drops them, since a missing path would otherwise borrow the device of the
+// mount above it (usually "/").
 func (c *Collector) mountUsage(table []mounts.Entry, path string) model.MountUsage {
 	entry, _ := mounts.Find(table, path)
 
@@ -246,7 +249,11 @@ func (c *Collector) mountUsage(table []mounts.Entry, path string) model.MountUsa
 			slog.Warn("Failed to stat mount, reporting as unavailable", "path", path, "device", entry.Device, "fsType", entry.FSType, "error", err)
 			c.mountFailing[path] = true
 		}
-		return model.MountUsage{Path: path, Device: entry.Device, FSType: entry.FSType, Error: err.Error()}
+		failed := model.MountUsage{Path: path, Error: err.Error()}
+		if errors.Is(err, errStatTimeout) {
+			failed.Device, failed.FSType = entry.Device, entry.FSType
+		}
+		return failed
 	}
 	if c.mountFailing[path] {
 		slog.Info("Mount readable again", "path", path)

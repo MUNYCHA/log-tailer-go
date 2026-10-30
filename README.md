@@ -339,7 +339,7 @@ A path is matched as written; symlinks are not resolved, since resolving would t
 
 A mount point named by more than one entry (an exact path and a wildcard, or two wildcards) is reported once, under the first.
 
-When a path has no reading, it is published with an `error` (and `device` and `fsType` when known), never with zero sizes that would read as an empty disk:
+When a path has no reading, it is published with an `error`, never with zero sizes that would read as an empty disk. Only a timeout keeps `device` and `fsType`, so the event names the NAS that is down:
 
 | Case | Published |
 |---|---|

@@ -93,10 +93,12 @@ func TestCollector_PublishesOneMixedGoodAndBadMount(t *testing.T) {
 	}
 }
 
-// A failed mount must publish only path and error, never zero sizes
+// A failed mount must publish only path and error, never zero sizes, nor the
+// device of the mount above it
 func TestMountUsage_ErrorOmitsSizesInJSON(t *testing.T) {
 	c := New(nil, "storage-channel", config.IdentityConfig{}, time.Minute, &fakePublisher{})
-	payload, err := json.Marshal(c.mountUsage(nil, "/this/path/does/not/exist/hopefully"))
+	table := []mounts.Entry{{Device: "/dev/sda1", Path: "/", FSType: "ext4"}}
+	payload, err := json.Marshal(c.mountUsage(table, "/this/path/does/not/exist/hopefully"))
 	if err != nil {
 		t.Fatal(err)
 	}
